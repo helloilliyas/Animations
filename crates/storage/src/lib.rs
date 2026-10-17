@@ -40,7 +40,7 @@ pub struct PricePoint {
     pub share_volume: u64,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct WatchList {
     pub id: i64,
     pub name: String,
