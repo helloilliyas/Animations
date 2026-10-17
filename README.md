@@ -15,8 +15,18 @@ See [`docs/atrad-spec.md`](docs/atrad-spec.md) for the feature spec.
 | `crates/cse-client` | Async client for CSE public data feeds, plus the `cse-probe` diagnostic tool |
 | `crates/engine` (`cse-engine`) | Paper trading: limit/market orders, Day or N-day TIF, queuing while closed, amend/cancel, fills, cash and buying power, portfolio with average cost, B.E.S, realised/unrealised P&L |
 | `crates/storage` (`cse-storage`) | SQLite: price and index snapshots for charts, watch lists, saved app state (paper account) |
+| `crates/service` (`cse-service`) | App backend: market data cache and poller, paper engine, real portfolio, JSON command API |
+| `crates/dev-server` | Runs the app in a desktop browser at http://127.0.0.1:8787 |
+| `app/ui` | Mobile UI (HTML/CSS/JS): Market, Watch, Quote, Buy/Sell, Orders, Portfolio, Settings |
+| `app/src-tauri` | Tauri 2 Android/desktop shell (built separately, see [`docs/android-build.md`](docs/android-build.md)) |
 
-Coming next: `app` (Tauri 2 Android UI).
+## Try it
+
+```sh
+cargo run -p cse-dev-server    # then open http://127.0.0.1:8787
+```
+
+To build the Android APK, follow [`docs/android-build.md`](docs/android-build.md).
 
 ## Paper-trading rules
 
