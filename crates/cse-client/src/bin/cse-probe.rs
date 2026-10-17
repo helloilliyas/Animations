@@ -44,9 +44,10 @@ async fn main() {
                     .map(|i| format!("{} ({:+})", i.value, i.change)),
                 Endpoint::MarketSummary => Ok(format!("{:?}", map::market_summary(&raw))),
                 Endpoint::TradeSummary => map::quotes(&raw).map(|q| format!("{} quotes", q.len())),
-                Endpoint::TopGainers | Endpoint::TopLosers | Endpoint::MostActive => {
+                Endpoint::TopGainers | Endpoint::TopLosers => {
                     map::movers(&raw).map(|m| format!("{} rows", m.len()))
                 }
+                Endpoint::MostActive => map::most_active(&raw).map(|m| format!("{} rows", m.len())),
                 Endpoint::CompanyInfo => map::company_quote(&symbol, &raw)
                     .map(|q| format!("{} last {}", q.symbol, q.last)),
             };

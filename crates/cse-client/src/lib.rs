@@ -9,7 +9,9 @@ pub mod parse;
 
 use std::time::Duration;
 
-use cse_core::{IndexValue, MarketPhase, MarketSummary, Quote, TopMover, TopMoverKind};
+use cse_core::{
+    ActiveStock, IndexValue, MarketPhase, MarketSummary, Quote, TopMover, TopMoverKind,
+};
 use serde_json::Value;
 
 pub const DEFAULT_BASE_URL: &str = "https://www.cse.lk/api/";
@@ -175,6 +177,11 @@ impl CseClient {
 
     /// Gainers, losers or most active. Turnover and share-volume rankings are
     /// derived from [`CseClient::all_quotes`] instead (see [`top_by`]).
+    /// Securities with the most trades today.
+    pub async fn most_active(&self) -> Result<Vec<ActiveStock>, Error> {
+        map::most_active(&self.raw(Endpoint::MostActive, &[]).await?)
+    }
+
     pub async fn top(&self, kind: TopMoverKind) -> Result<Vec<TopMover>, Error> {
         let endpoint = match kind {
             TopMoverKind::Gainers => Endpoint::TopGainers,
@@ -251,9 +258,10 @@ pub mod map {
     pub fn market_summary(v: &Value) -> MarketSummary {
         let v = object(v, &["reqMarketSummery", "marketSummary"]);
         MarketSummary {
-            turnover: decimal_or_zero(v, &["tradeValue", "turnover", "totalTurnover"]),
+            // In this feed `tradeVolume` is the rupee turnover, not a count.
+            turnover: decimal_or_zero(v, &["turnover", "tradeValue", "tradeVolume"]),
             share_volume: count(v, &["shareVolume", "sharevolume", "volume"]),
-            trades: count(v, &["tradeVolume", "tradevolume", "trades", "noOfTrades"]),
+            trades: count(v, &["trades", "noOfTrades"]),
         }
     }
 
@@ -273,9 +281,9 @@ pub mod map {
             open: decimal(v, &["open", "openPrice"]),
             high: decimal(v, &["high", "highPrice", "hiTrade"]),
             low: decimal(v, &["low", "lowPrice", "lowTrade"]),
-            share_volume: count(v, &["sharevolume", "shareVolume", "quantity", "volume"]),
-            trades: count(v, &["tradevolume", "tradeVolume", "trades"]),
-            turnover: decimal_or_zero(v, &["turnover", "tradeValue"]),
+            share_volume: count(v, &["sharevolume", "shareVolume", "tdyShareVolume"]),
+            trades: count(v, &["tradevolume", "tradeVolume", "tdyTradeVolume"]),
+            turnover: decimal_or_zero(v, &["turnover", "tdyTurnover"]),
             last_traded_at: timestamp(v, &["lastTradedTime", "lastTradedDate", "time"]),
         })
     }
@@ -305,6 +313,21 @@ pub mod map {
             q.symbol = symbol.to_owned();
         }
         Ok(q)
+    }
+
+    /// Most active securities (by trades). This feed carries no prices.
+    pub fn most_active(v: &Value) -> Result<Vec<ActiveStock>, Error> {
+        list(v, &["data"])
+            .iter()
+            .map(|r| {
+                Ok(ActiveStock {
+                    symbol: req_string(r, SYMBOL)?,
+                    share_volume: count(r, &["shareVolume", "sharevolume"]),
+                    trades: count(r, &["tradeVolume", "tradevolume", "trades"]),
+                    turnover: decimal_or_zero(r, &["turnover"]),
+                })
+            })
+            .collect()
     }
 
     pub fn movers(v: &Value) -> Result<Vec<TopMover>, Error> {

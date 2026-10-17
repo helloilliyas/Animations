@@ -10,5 +10,7 @@ pub mod tick;
 
 pub use fees::{FeeComponent, FeeSchedule};
 pub use market_hours::{MarketCalendar, MarketPhase};
-pub use models::{Announcement, IndexValue, MarketSummary, Quote, TopMover, TopMoverKind};
+pub use models::{
+    ActiveStock, Announcement, IndexValue, MarketSummary, Quote, TopMover, TopMoverKind,
+};
 pub use tick::{TickBand, TickTable};

@@ -63,6 +63,15 @@ pub struct TopMover {
     pub change_pct: Decimal,
 }
 
+/// One row of the most-active list (ranked by number of trades).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ActiveStock {
+    pub symbol: String,
+    pub share_volume: u64,
+    pub trades: u64,
+    pub turnover: Decimal,
+}
+
 /// A CSE company announcement.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Announcement {
