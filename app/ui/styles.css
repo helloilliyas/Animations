@@ -157,3 +157,8 @@ input[type=number] { -moz-appearance: textfield; }
 .toast.err { border-color: var(--down); }
 .banner { background: rgba(245,158,11,.12); border: 1px solid rgba(245,158,11,.4); color: #fcd34d; border-radius: 10px; padding: 8px 12px; font-size: 12px; margin-bottom: 10px; }
 textarea { min-height: 110px; font-family: ui-monospace, monospace; font-size: 12px; }
+
+.tv { position: fixed; inset: 0; z-index: 30; background: var(--bg); display: flex; flex-direction: column; padding-top: env(safe-area-inset-top); padding-bottom: env(safe-area-inset-bottom); }
+.tv-bar { display: flex; align-items: center; gap: 10px; padding: 8px 12px; border-bottom: 1px solid var(--line); }
+.tv-bar b { flex: 1; }
+.tv-host { flex: 1; min-height: 0; }

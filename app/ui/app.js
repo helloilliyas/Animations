@@ -343,10 +343,12 @@ async function openQuote(symbol) {
     <div class="btn-row">
       <button class="btn buy" id="q-buy">Buy</button>
       <button class="btn sell" id="q-sell">Sell</button>
-    </div>`, (root) => {
+    </div>
+    <div class="btn-row"><button class="btn ghost" id="q-tv">📈 TradingView chart &amp; tools</button></div>`, (root) => {
     mountChart($("#q-chart", root), symbol);
     $("#q-buy", root).onclick = () => { closeSheet(); goTicket(symbol, "Buy", q.last); };
     $("#q-sell", root).onclick = () => { closeSheet(); goTicket(symbol, "Sell", q.last); };
+    $("#q-tv", root).onclick = () => { closeSheet(); openTradingView(symbol); };
     $("#q-fav", root).onclick = () => pickWatchList(symbol);
   });
 }
@@ -366,6 +368,47 @@ async function pickWatchList(symbol) {
   await loadWatchLists();
   $("#q-fav").textContent = watchLists.some((w) => w.symbols.includes(symbol)) ? "★" : "☆";
 }
+
+// ---------- TradingView ----------
+// CSE symbols on TradingView are prefixed with the exchange code CSELK.
+const tvSymbol = (symbol) => "CSELK:" + symbol;
+function openExternal(url) {
+  if (window.__TAURI__) return window.__TAURI__.core.invoke("plugin:opener|open_url", { url });
+  window.open(url, "_blank", "noopener");
+}
+function openTradingView(symbol) {
+  const overlay = $("#tv");
+  $("#tv-title").textContent = symbol;
+  $("#tv-open").onclick = () =>
+    attempt(() => openExternal("https://www.tradingview.com/chart/?symbol=" + encodeURIComponent(tvSymbol(symbol))));
+  const host = $("#tv-host");
+  host.innerHTML = `<div class="tradingview-widget-container" style="height:100%;width:100%">
+    <div class="tradingview-widget-container__widget" style="height:100%;width:100%"></div></div>`;
+  const script = document.createElement("script");
+  script.src = "https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js";
+  script.async = true;
+  script.textContent = JSON.stringify({
+    autosize: true,
+    symbol: tvSymbol(symbol),
+    interval: "D",
+    timezone: "Asia/Colombo",
+    theme: "dark",
+    style: "1",
+    locale: "en",
+    allow_symbol_change: true,
+    hide_side_toolbar: false,
+    withdateranges: true,
+    save_image: false,
+    calendar: false,
+    support_host: "https://www.tradingview.com",
+  });
+  script.onerror = () => {
+    host.innerHTML = `<div class="empty">Couldn't load TradingView. Check your internet connection, or use “Open in TradingView”.</div>`;
+  };
+  host.firstElementChild.appendChild(script);
+  overlay.classList.remove("hidden");
+}
+$("#tv-close").onclick = () => { $("#tv").classList.add("hidden"); $("#tv-host").innerHTML = ""; };
 
 // ---------- Buy / Sell ----------
 function goTicket(symbol, side, price) {

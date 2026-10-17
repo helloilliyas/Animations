@@ -21,6 +21,14 @@
     <div class="sheet-body" id="sheet-body"></div>
   </div>
   <div id="toast" class="toast hidden"></div>
+  <div id="tv" class="tv hidden" role="dialog" aria-modal="true" aria-label="TradingView chart">
+    <div class="tv-bar">
+      <button class="icon-btn" id="tv-close" aria-label="Close">✕</button>
+      <b id="tv-title"></b>
+      <button class="btn small ghost" id="tv-open">Open in TradingView</button>
+    </div>
+    <div id="tv-host" class="tv-host"></div>
+  </div>
 
   <nav class="tabbar">
     <button data-tab="market" class="active"><span class="ti">◷</span>Market</button>
