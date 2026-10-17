@@ -13,10 +13,21 @@ See [`docs/atrad-spec.md`](docs/atrad-spec.md) for the feature spec.
 |---|---|
 | `crates/core` (`cse-core`) | Models (quotes, indices, announcements), fee schedule, tick sizes, CSE market hours |
 | `crates/cse-client` | Async client for CSE public data feeds, plus the `cse-probe` diagnostic tool |
-| `crates/storage` (`cse-storage`) | SQLite: price and index snapshots for charts, watch lists |
+| `crates/engine` (`cse-engine`) | Paper trading: limit/market orders, Day or N-day TIF, queuing while closed, amend/cancel, fills, cash and buying power, portfolio with average cost, B.E.S, realised/unrealised P&L |
+| `crates/storage` (`cse-storage`) | SQLite: price and index snapshots for charts, watch lists, saved app state (paper account) |
 
-Coming next: `engine` (paper-trading orders and portfolio) and `app` (Tauri 2
-Android UI).
+Coming next: `app` (Tauri 2 Android UI).
+
+## Paper-trading rules
+
+- Orders fill in full at the last traded price: market orders at once, limit
+  buys when last <= limit, limit sells when last >= limit.
+- Orders placed outside 09:30–14:30 are **queued** and open at the next session.
+- Day orders expire at that session's close; N-day orders at the close of the
+  Nth trading session (weekends and holidays skipped).
+- Buy orders reserve their value plus fees from buying power; sell orders
+  reserve shares. No short selling.
+- A market buy is rejected if the price moved so far that cash runs short.
 
 ## Development
 

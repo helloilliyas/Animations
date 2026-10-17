@@ -10,6 +10,8 @@ use chrono::{DateTime, TimeZone, Utc};
 use cse_core::{IndexValue, Quote};
 use rusqlite::{params, Connection, OptionalExtension};
 use rust_decimal::Decimal;
+use serde::de::DeserializeOwned;
+use serde::Serialize;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -21,6 +23,11 @@ pub enum Error {
     WatchListNotFound(i64),
     #[error("a watch list named {0:?} already exists")]
     DuplicateWatchList(String),
+    #[error("stored {key:?} could not be read: {source}")]
+    Json {
+        key: String,
+        source: serde_json::Error,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -44,9 +51,10 @@ pub struct Store {
     conn: Connection,
 }
 
-const SCHEMA_VERSION: i64 = 1;
+/// Schema migrations; entry N upgrades `user_version` N to N + 1.
+const MIGRATIONS: &[&str] = &[V1, V2];
 
-const SCHEMA: &str = "
+const V1: &str = "
 CREATE TABLE quote_snapshot (
     symbol       TEXT    NOT NULL,
     at_ms        INTEGER NOT NULL,
@@ -81,6 +89,15 @@ CREATE TABLE watch_list_item (
 );
 ";
 
+/// Whole objects stored as JSON, such as the paper account.
+const V2: &str = "
+CREATE TABLE app_state (
+    key        TEXT    PRIMARY KEY,
+    json       TEXT    NOT NULL,
+    updated_ms INTEGER NOT NULL
+);
+";
+
 impl Store {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         Self::init(Connection::open(path)?)
@@ -92,10 +109,11 @@ impl Store {
 
     fn init(conn: Connection) -> Result<Self> {
         conn.execute_batch("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;")?;
-        let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if version < SCHEMA_VERSION {
+        let version: usize = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        for (i, sql) in MIGRATIONS.iter().enumerate().skip(version) {
             conn.execute_batch(&format!(
-                "BEGIN; {SCHEMA} PRAGMA user_version = {SCHEMA_VERSION}; COMMIT;"
+                "BEGIN; {sql} PRAGMA user_version = {}; COMMIT;",
+                i + 1
             ))?;
         }
         Ok(Self { conn })
@@ -205,6 +223,36 @@ impl Store {
             + tx.execute("DELETE FROM index_snapshot WHERE at_ms < ?1", [ms])?;
         tx.commit()?;
         Ok(n)
+    }
+
+    /// Saves any serialisable value under `key`, replacing the previous one.
+    pub fn save_json<T: Serialize>(&mut self, key: &str, value: &T) -> Result<()> {
+        let json = serde_json::to_string(value).map_err(|source| Error::Json {
+            key: key.to_owned(),
+            source,
+        })?;
+        self.conn.execute(
+            "INSERT OR REPLACE INTO app_state (key, json, updated_ms) VALUES (?1, ?2, ?3)",
+            params![key, json, Utc::now().timestamp_millis()],
+        )?;
+        Ok(())
+    }
+
+    /// Loads the value saved under `key`, if any.
+    pub fn load_json<T: DeserializeOwned>(&self, key: &str) -> Result<Option<T>> {
+        let json: Option<String> = self
+            .conn
+            .query_row("SELECT json FROM app_state WHERE key = ?1", [key], |r| {
+                r.get(0)
+            })
+            .optional()?;
+        json.map(|j| {
+            serde_json::from_str(&j).map_err(|source| Error::Json {
+                key: key.to_owned(),
+                source,
+            })
+        })
+        .transpose()
     }
 
     pub fn create_watch_list(&mut self, name: &str) -> Result<i64> {
@@ -429,6 +477,31 @@ mod tests {
             s.add_to_watch_list(id, "X"),
             Err(Error::WatchListNotFound(_))
         ));
+    }
+
+    #[test]
+    fn json_state_round_trips() {
+        let mut s = Store::open_in_memory().unwrap();
+        assert_eq!(s.load_json::<Vec<u32>>("k").unwrap(), None);
+        s.save_json("k", &vec![1u32, 2]).unwrap();
+        s.save_json("k", &vec![3u32]).unwrap();
+        assert_eq!(s.load_json::<Vec<u32>>("k").unwrap(), Some(vec![3]));
+        assert!(matches!(
+            s.load_json::<String>("k"),
+            Err(Error::Json { .. })
+        ));
+    }
+
+    #[test]
+    fn upgrades_a_version_1_database() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(&format!("{V1} PRAGMA user_version = 1;"))
+            .unwrap();
+        conn.execute("INSERT INTO watch_list (name) VALUES ('Old')", [])
+            .unwrap();
+        let mut s = Store::init(conn).unwrap();
+        assert_eq!(s.watch_lists().unwrap()[0].name, "Old");
+        s.save_json("k", &1).unwrap();
     }
 
     #[test]

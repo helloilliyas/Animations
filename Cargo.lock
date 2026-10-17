@@ -181,6 +181,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "cse-engine"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "cse-core",
+ "cse-storage",
+ "rust_decimal",
+ "rust_decimal_macros",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "cse-storage"
 version = "0.1.0"
 dependencies = [
@@ -189,6 +203,8 @@ dependencies = [
  "rusqlite",
  "rust_decimal",
  "rust_decimal_macros",
+ "serde",
+ "serde_json",
  "thiserror",
 ]
 
