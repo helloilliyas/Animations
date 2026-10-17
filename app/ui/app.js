@@ -151,6 +151,8 @@ function renderMarket() {
       </div>
       <div class="legend"><span class="up">▲ ${b.positive}</span><span class="flat">● ${b.neutral}</span><span class="down">▼ ${b.negative}</span></div>
     </div>
+    <h2>ASPI chart</h2>
+    <div class="card chart-box" id="aspi-chart"></div>
     <h2>Top stocks</h2>
     <div class="seg" id="top-tabs">${Object.entries(tabs).map(([k, v]) =>
       `<button data-k="${k}" class="${state.topTab === k ? "active" : ""}">${v}</button>`).join("")}</div>
@@ -158,6 +160,8 @@ function renderMarket() {
     <p class="muted small">Updated ${timeStr(m.updated_at)} · ${m.securities} securities</p>`;
 }
 function mountMarket(root) {
+  const aspi = $("#aspi-chart", root);
+  if (aspi) mountChart(aspi, null);
   $$("#top-tabs button", root).forEach((b) => (b.onclick = () => {
     state.topTab = b.dataset.k; prefSet("topTab", state.topTab); render();
   }));
@@ -232,22 +236,82 @@ function mountWatch(root) {
 async function loadWatchLists() { watchLists = await call("watch_lists"); }
 
 // ---------- Quote sheet ----------
+// ---------- charts ----------
+const RANGES = ["1D", "1W", "1M", "3M", "1Y", "All"];
+const chartCache = new Map(); // "key|range" -> { at, data }
 function chartSvg(points) {
-  if (!points || points.length < 2) {
-    return `<div class="empty small">The chart fills in as the app records prices during market hours.</div>`;
-  }
-  const w = 600, h = 160, pad = 6;
+  const w = 600, h = 170, pad = 4;
   const ys = points.map((p) => num(p.price));
   const xs = points.map((p) => new Date(p.at).getTime());
-  const minY = Math.min(...ys), maxY = Math.max(...ys);
+  let minY = Math.min(...ys), maxY = Math.max(...ys);
+  // Keep at least a 3% vertical span so one-tick moves don't fill the chart.
+  const mid = (minY + maxY) / 2, minSpan = Math.abs(mid) * 0.03;
+  if (maxY - minY < minSpan) { minY = mid - minSpan / 2; maxY = mid + minSpan / 2; }
   const minX = xs[0], maxX = xs[xs.length - 1];
   const sx = (x) => pad + ((x - minX) / (maxX - minX || 1)) * (w - 2 * pad);
   const sy = (y) => h - pad - ((y - minY) / (maxY - minY || 1)) * (h - 2 * pad);
-  const d = points.map((p, i) => `${i ? "L" : "M"}${sx(xs[i]).toFixed(1)},${sy(ys[i]).toFixed(1)}`).join("");
-  const color = ys[ys.length - 1] >= ys[0] ? "var(--up)" : "var(--down)";
+  const line = points.map((p, i) => `${i ? "L" : "M"}${sx(xs[i]).toFixed(1)},${sy(ys[i]).toFixed(1)}`).join("");
+  const area = `${line}L${sx(maxX).toFixed(1)},${h}L${sx(minX).toFixed(1)},${h}Z`;
+  const up = ys[ys.length - 1] >= ys[0];
+  const color = up ? "var(--up)" : "var(--down)";
+  const gid = "g" + Math.random().toString(36).slice(2, 8);
   return `<svg class="chart" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" role="img" aria-label="Price chart">
-    <path class="line" d="${d}" stroke="${color}"/></svg>
-    <div class="legend small muted"><span>${fmt(minY)} – ${fmt(maxY)}</span><span>${points.length} points</span></div>`;
+    <defs><linearGradient id="${gid}" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="${up ? "#22c55e" : "#ef4444"}" stop-opacity=".28"/>
+      <stop offset="1" stop-color="${up ? "#22c55e" : "#ef4444"}" stop-opacity="0"/></linearGradient></defs>
+    <path d="${area}" fill="url(#${gid})" stroke="none"/>
+    <path class="line" d="${line}" stroke="${color}" vector-effect="non-scaling-stroke"/></svg>`;
+}
+function chartLabel(iso, range) {
+  const d = new Date(iso);
+  const opts = range === "1D"
+    ? { hour: "2-digit", minute: "2-digit" }
+    : range === "1W" || range === "1M" ? { day: "2-digit", month: "short" }
+    : { month: "short", year: "numeric" };
+  return d.toLocaleString("en-GB", { timeZone: "Asia/Colombo", ...opts });
+}
+function chartBody(data) {
+  const pts = data.points || [];
+  const note = data.error ? `<div class="small muted">CSE history unavailable right now — showing saved data.</div>` : "";
+  const saved = data.history_days
+    ? `<div class="small muted">History saved on this phone: ${fmtInt(data.history_days)} days since ${esc(data.history_since)}</div>` : "";
+  if (pts.length < 2) {
+    return `<div class="empty small">${data.range === "1D" ? "No trades yet today." : "No price history yet."}</div>${note}${saved}`;
+  }
+  const ys = pts.map((p) => num(p.price));
+  return `${chartSvg(pts)}
+    <div class="legend small muted"><span>${chartLabel(pts[0].at, data.range)}</span>
+      <span class="num ${dir(data.change)}">${signed(data.change)} (${pct(data.change_pct)})</span>
+      <span>${chartLabel(pts[pts.length - 1].at, data.range)}</span></div>
+    <div class="legend small muted"><span>Low ${fmt(Math.min(...ys))}</span><span>${fmtInt(pts.length)} points</span><span>High ${fmt(Math.max(...ys))}</span></div>
+    ${note}${data.range === "All" ? saved : ""}`;
+}
+// Renders a chart with range buttons into `el`. symbol = null for ASPI.
+async function mountChart(el, symbol) {
+  const key = symbol || "ASPI";
+  let range = prefGet("chartRange", "1M");
+  const draw = async () => {
+    el.innerHTML = `<div class="seg chart-ranges">${RANGES.map((r) =>
+      `<button data-r="${r}" class="${r === range ? "active" : ""}">${r}</button>`).join("")}</div>
+      <div class="chart-area"></div>`;
+    $$(".chart-ranges button", el).forEach((b) => (b.onclick = () => {
+      range = b.dataset.r; prefSet("chartRange", range); draw();
+    }));
+    const area = $(".chart-area", el);
+    const cacheKey = key + "|" + range;
+    const ttl = range === "1D" ? 60e3 : 10 * 60e3;
+    const hit = chartCache.get(cacheKey);
+    if (hit && Date.now() - hit.at < ttl) { area.innerHTML = chartBody(hit.data); return; }
+    area.innerHTML = `<div class="empty small">Loading chart…</div>`;
+    try {
+      const data = await call("chart", symbol ? { symbol, range } : { range });
+      chartCache.set(cacheKey, { at: Date.now(), data });
+      if (el.isConnected) area.innerHTML = chartBody(data);
+    } catch (e) {
+      area.innerHTML = `<div class="empty small">${esc(e.message || e)}</div>`;
+    }
+  };
+  await draw();
 }
 async function openQuote(symbol) {
   const data = await attempt(() => call("quote", { symbol }));
@@ -265,7 +329,7 @@ async function openQuote(symbol) {
       <div class="last num">${fmt(q.last)}</div>
       <div class="right"><span class="pill ${dir(q.change)} num">${signed(q.change)} (${pct(q.change_pct)})</span></div>
     </div>
-    ${chartSvg(data.history)}
+    <div class="chart-box" id="q-chart"></div>
     <div class="card" style="margin-top:12px"><div class="kv">
       ${field("Open", fmt(q.open))}${field("High", fmt(q.high))}${field("Low", fmt(q.low))}
       ${field("Prev. close", fmt(q.prev_close))}${field("Volume", fmtInt(q.share_volume))}
@@ -280,6 +344,7 @@ async function openQuote(symbol) {
       <button class="btn buy" id="q-buy">Buy</button>
       <button class="btn sell" id="q-sell">Sell</button>
     </div>`, (root) => {
+    mountChart($("#q-chart", root), symbol);
     $("#q-buy", root).onclick = () => { closeSheet(); goTicket(symbol, "Buy", q.last); };
     $("#q-sell", root).onclick = () => { closeSheet(); goTicket(symbol, "Sell", q.last); };
     $("#q-fav", root).onclick = () => pickWatchList(symbol);

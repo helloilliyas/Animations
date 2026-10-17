@@ -132,7 +132,10 @@ input[type=number] { -moz-appearance: textfield; }
 
 .quote-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
 .quote-head .last { font-size: 30px; font-weight: 800; }
-.chart { width: 100%; height: 160px; display: block; margin-top: 10px; }
+.chart { width: 100%; height: 170px; display: block; margin-top: 10px; }
+.chart-box { margin-top: 10px; }
+.chart-ranges button { padding: 6px 4px; font-size: 13px; }
+.chart-area .legend { margin-top: 4px; }
 .chart path.line { fill: none; stroke-width: 2; }
 
 .tabbar {
