@@ -1,0 +1,17 @@
+[package]
+name = "cse-storage"
+description = "SQLite persistence for snapshots and watch lists"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+cse-core.workspace = true
+chrono.workspace = true
+rusqlite.workspace = true
+rust_decimal.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+rust_decimal_macros.workspace = true
