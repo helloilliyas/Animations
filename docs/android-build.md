@@ -46,6 +46,25 @@ is written to:
 gen/android/app/build/outputs/apk/universal/release/app-universal-release-unsigned.apk
 ```
 
+If Gradle fails with **429 Too Many Requests** from Maven Central (common on
+shared networks), point it at Google's mirror of Maven Central by saving this
+as `~/.gradle/init.d/maven-mirror.gradle` and building again:
+
+```groovy
+def mirror = 'https://maven-central.storage-download.googleapis.com/maven2/'
+beforeSettings { settings ->
+    settings.pluginManagement.repositories {
+        maven { url mirror; name 'CentralMirror' }
+        google()
+        gradlePluginPortal()
+    }
+}
+allprojects {
+    buildscript.repositories { maven { url mirror; name 'CentralMirror' } }
+    repositories { maven { url mirror; name 'CentralMirror' } }
+}
+```
+
 ## 4. Sign
 
 Android only installs signed APKs. Create a key once and **keep it safe**:
