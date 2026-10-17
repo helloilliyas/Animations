@@ -12,9 +12,11 @@
 pub mod account;
 pub mod order;
 pub mod portfolio;
+pub mod real;
 
 pub use account::{Account, AccountSummary, CashEntry, OrderError, Settings};
 pub use order::{
     Fill, Order, OrderEvent, OrderId, OrderRequest, OrderStatus, OrderType, Side, Tif,
 };
 pub use portfolio::{Holding, HoldingValue, Portfolio, PortfolioError, Valuation};
+pub use real::{NewTransaction, RealError, RealPortfolio, Transaction};
