@@ -6,8 +6,9 @@
 use std::path::Path;
 use std::str::FromStr;
 
-use chrono::{DateTime, TimeZone, Utc};
-use cse_core::{IndexValue, Quote};
+use chrono::{DateTime, NaiveDate, TimeZone, Utc};
+use cse_core::market_hours::colombo;
+use cse_core::{ChartPoint, IndexValue, Quote};
 use rusqlite::{params, Connection, OptionalExtension};
 use rust_decimal::Decimal;
 use serde::de::DeserializeOwned;
@@ -52,7 +53,7 @@ pub struct Store {
 }
 
 /// Schema migrations; entry N upgrades `user_version` N to N + 1.
-const MIGRATIONS: &[&str] = &[V1, V2];
+const MIGRATIONS: &[&str] = &[V1, V2, V3];
 
 const V1: &str = "
 CREATE TABLE quote_snapshot (
@@ -90,6 +91,20 @@ CREATE TABLE watch_list_item (
 ";
 
 /// Whole objects stored as JSON, such as the paper account.
+/// One row per security (or index) per trading day; kept forever so
+/// history grows beyond the one year the CSE serves.
+const V3: &str = "
+CREATE TABLE daily_price (
+    key    TEXT    NOT NULL,
+    day    TEXT    NOT NULL,
+    close  TEXT    NOT NULL,
+    high   TEXT,
+    low    TEXT,
+    volume INTEGER,
+    PRIMARY KEY (key, day)
+) WITHOUT ROWID;
+";
+
 const V2: &str = "
 CREATE TABLE app_state (
     key        TEXT    PRIMARY KEY,
@@ -211,6 +226,64 @@ impl Store {
         rows.map(|row| {
             let (ms, v) = row?;
             Ok((from_ms(ms), dec(&v)?))
+        })
+        .collect()
+    }
+
+    /// Saves daily points for `key` (a symbol or index name), one per Sri
+    /// Lanka calendar day; a later save for the same day replaces it.
+    pub fn save_daily(&mut self, key: &str, points: &[ChartPoint]) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        {
+            let mut stmt = tx.prepare_cached(
+                "INSERT OR REPLACE INTO daily_price (key, day, close, high, low, volume)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            )?;
+            for p in points {
+                stmt.execute(params![
+                    key,
+                    lk_day(p.at).to_string(),
+                    p.price.to_string(),
+                    p.high.map(|d| d.to_string()),
+                    p.low.map(|d| d.to_string()),
+                    p.volume.map(|v| v as i64),
+                ])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Daily points for `key` from `since` (inclusive, all if `None`), oldest
+    /// first. Each point is timestamped at 00:00 Sri Lanka time of its day.
+    pub fn daily_history(&self, key: &str, since: Option<NaiveDate>) -> Result<Vec<ChartPoint>> {
+        let since = since.map(|d| d.to_string()).unwrap_or_default();
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT day, close, high, low, volume FROM daily_price
+             WHERE key = ?1 AND day >= ?2 ORDER BY day",
+        )?;
+        let rows = stmt.query_map(params![key, since], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, Option<String>>(2)?,
+                r.get::<_, Option<String>>(3)?,
+                r.get::<_, Option<i64>>(4)?,
+            ))
+        })?;
+        rows.map(|row| {
+            let (day, close, high, low, volume) = row?;
+            let day = NaiveDate::from_str(&day).map_err(|_| Error::Decimal(day.clone()))?;
+            Ok(ChartPoint {
+                at: colombo()
+                    .from_local_datetime(&day.and_hms_opt(0, 0, 0).unwrap())
+                    .unwrap()
+                    .with_timezone(&Utc),
+                price: dec(&close)?,
+                high: high.as_deref().map(dec).transpose()?,
+                low: low.as_deref().map(dec).transpose()?,
+                volume: volume.map(|v| v.max(0) as u64),
+            })
         })
         .collect()
     }
@@ -355,6 +428,11 @@ impl Store {
     }
 }
 
+/// Sri Lanka calendar day of an instant.
+fn lk_day(at: DateTime<Utc>) -> NaiveDate {
+    at.with_timezone(&colombo()).date_naive()
+}
+
 fn from_ms(ms: i64) -> DateTime<Utc> {
     Utc.timestamp_millis_opt(ms).single().unwrap_or_default()
 }
@@ -384,6 +462,7 @@ mod tests {
             trades: 3,
             turnover: dec!(1000.25),
             last_traded_at: None,
+            security_id: None,
         }
     }
 
@@ -477,6 +556,40 @@ mod tests {
             s.add_to_watch_list(id, "X"),
             Err(Error::WatchListNotFound(_))
         ));
+    }
+
+    #[test]
+    fn daily_history_keeps_one_row_per_day_and_filters() {
+        let mut s = Store::open_in_memory().unwrap();
+        let pt = |at: DateTime<Utc>, price| ChartPoint {
+            at,
+            price,
+            high: Some(price + dec!(1)),
+            low: None,
+            volume: Some(10),
+        };
+        // 15 Oct 18:30 UTC is 16 Oct 00:00 in Sri Lanka (CSE daily rows);
+        // 16 Oct 09:18 UTC is 16 Oct 14:48 (CSE index rows): same day.
+        let a = Utc.with_ymd_and_hms(2026, 10, 15, 18, 30, 0).unwrap();
+        let b = Utc.with_ymd_and_hms(2026, 10, 16, 9, 18, 0).unwrap();
+        let c = Utc.with_ymd_and_hms(2026, 10, 19, 9, 0, 0).unwrap();
+        s.save_daily("JKH", &[pt(a, dec!(18.0)), pt(c, dec!(18.5))])
+            .unwrap();
+        s.save_daily("JKH", &[pt(b, dec!(18.1))]).unwrap();
+        s.save_daily("ASPI", &[pt(b, dec!(20185.05))]).unwrap();
+
+        let all = s.daily_history("JKH", None).unwrap();
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].price, dec!(18.1)); // replaced, same day
+        assert_eq!(all[0].high, Some(dec!(19.1)));
+        assert_eq!(all[0].low, None);
+        assert_eq!(all[0].at, a); // midnight Sri Lanka time
+        let recent = s
+            .daily_history("JKH", NaiveDate::from_ymd_opt(2026, 10, 17))
+            .unwrap();
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0].price, dec!(18.5));
+        assert_eq!(s.daily_history("ASPI", None).unwrap().len(), 1);
     }
 
     #[test]

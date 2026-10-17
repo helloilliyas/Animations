@@ -39,7 +39,14 @@ async fn stub(routes: HashMap<&'static str, String>) -> String {
                     .nth(1)
                     .unwrap_or("")
                     .trim_start_matches("/api/");
-                let (status, body) = match routes.get(path) {
+                // Intraday chart requests (period=1) get their own fixture.
+                let intraday = format!("{path}#1D");
+                let key = if req.contains("period=1") && routes.contains_key(intraday.as_str()) {
+                    intraday.as_str()
+                } else {
+                    path
+                };
+                let (status, body) = match routes.get(key) {
                     Some(b) => (200, b.clone()),
                     None => (404, "{}".to_owned()),
                 };
@@ -52,6 +59,13 @@ async fn stub(routes: HashMap<&'static str, String>) -> String {
         }
     });
     format!("http://{addr}/api")
+}
+
+fn chart_routes(r: &mut HashMap<&'static str, String>) {
+    r.insert("companyChartDataByStock", fixture("stockChart-1Y"));
+    r.insert("companyChartDataByStock#1D", fixture("stockChart-1D"));
+    r.insert("chartData", fixture("indexChart-1Y"));
+    r.insert("chartData#1D", fixture("indexChart-1D"));
 }
 
 fn routes(status: &str) -> HashMap<&'static str, String> {
@@ -80,6 +94,14 @@ fn lk(h: u32, m: u32) -> DateTime<Utc> {
         .with_timezone(&Utc)
 }
 
+/// Sri Lanka local time on any October 2026 day.
+fn lk_on(d: u32, h: u32, m: u32) -> DateTime<Utc> {
+    colombo()
+        .with_ymd_and_hms(2026, 10, d, h, m, 0)
+        .unwrap()
+        .with_timezone(&Utc)
+}
+
 struct Harness {
     svc: AppService,
     clock: Arc<Mutex<DateTime<Utc>>>,
@@ -87,7 +109,13 @@ struct Harness {
 
 impl Harness {
     async fn new(status: &str, at: DateTime<Utc>) -> Self {
-        let base = stub(routes(status)).await;
+        let mut r = routes(status);
+        chart_routes(&mut r);
+        Self::with_routes(r, at).await
+    }
+
+    async fn with_routes(routes: HashMap<&'static str, String>, at: DateTime<Utc>) -> Self {
+        let base = stub(routes).await;
         let clock = Arc::new(Mutex::new(at));
         let c = clock.clone();
         let svc = AppService::with(
@@ -273,4 +301,66 @@ async fn bad_input_is_rejected_cleanly() {
         .await
         .unwrap_err();
     assert!(e.to_string().starts_with("bad arguments"));
+}
+
+#[tokio::test]
+async fn charts_from_cse_history_and_intraday() {
+    // Saturday 17 Oct 2026, after Friday's session.
+    let h = Harness::new("Market Closed", lk_on(17, 10, 0)).await;
+    h.call("refresh", Value::Null).await;
+
+    let year = h
+        .call("chart", json!({"symbol": "JKH.N0000", "range": "1Y"}))
+        .await;
+    assert_eq!(year["source"], "history");
+    assert_eq!(year["error"], Value::Null);
+    assert_eq!(year["points"].as_array().unwrap().len(), 241);
+    assert_eq!(year["history_days"], 241);
+    assert_eq!(year["points"][240]["price"], "18.0");
+
+    let month = h
+        .call("chart", json!({"symbol": "JKH.N0000", "range": "1M"}))
+        .await;
+    let n = month["points"].as_array().unwrap().len();
+    assert!((18..=24).contains(&n), "1M had {n} points");
+
+    let day = h
+        .call("chart", json!({"symbol": "JKH.N0000", "range": "1D"}))
+        .await;
+    assert_eq!(day["source"], "cse");
+    assert_eq!(day["points"].as_array().unwrap().len(), 349);
+
+    let aspi = h.call("chart", json!({"range": "1Y"})).await;
+    assert_eq!(aspi["key"], "ASPI");
+    assert_eq!(aspi["points"].as_array().unwrap().len(), 240);
+    assert_eq!(aspi["points"][239]["price"], "20185.05");
+    let aspi_day = h.call("chart", json!({"range": "1D"})).await;
+    assert_eq!(aspi_day["points"].as_array().unwrap().len(), 300);
+}
+
+#[tokio::test]
+async fn session_closes_are_stored_and_survive_cse_outages() {
+    // No chart routes: the CSE history feed is "down".
+    // Friday 16 Oct 15:00, after the close; fixture trades are from that day.
+    let h = Harness::with_routes(routes("Market Closed"), lk_on(16, 15, 0)).await;
+    h.call("refresh", Value::Null).await;
+
+    let all = h
+        .call("chart", json!({"symbol": "ABAN.N0000", "range": "All"}))
+        .await;
+    assert!(all["error"].as_str().unwrap().contains("404"));
+    let points = all["points"].as_array().unwrap();
+    assert_eq!(points.len(), 1, "today's close was saved locally");
+    assert_eq!(points[0]["price"], "1025.0");
+    assert_eq!(all["history_since"], "2026-10-16");
+
+    let aspi = h.call("chart", json!({"range": "All"})).await;
+    assert_eq!(aspi["points"][0]["price"], "20185.05");
+
+    // Intraday falls back to the app's own snapshots (none here) with an error.
+    let day = h
+        .call("chart", json!({"symbol": "ABAN.N0000", "range": "1D"}))
+        .await;
+    assert_eq!(day["source"], "local");
+    assert!(day["error"].is_string());
 }

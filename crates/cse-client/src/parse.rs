@@ -35,6 +35,11 @@ pub fn count(v: &Value, keys: &[&str]) -> u64 {
         .unwrap_or(0)
 }
 
+/// A non-negative whole number, or `None` when absent.
+pub fn count_opt(v: &Value, keys: &[&str]) -> Option<u64> {
+    decimal(v, keys).and_then(|d| u64::try_from(d.trunc()).ok())
+}
+
 pub fn string(v: &Value, keys: &[&str]) -> Option<String> {
     match field(v, keys)? {
         Value::String(s) if !s.trim().is_empty() => Some(s.trim().to_owned()),

@@ -24,6 +24,9 @@ async fn main() {
     for endpoint in Endpoint::ALL {
         let form: Vec<(&str, &str)> = match endpoint {
             Endpoint::CompanyInfo => vec![("symbol", symbol.as_str())],
+            // JKH.N0000, one year of daily prices.
+            Endpoint::StockChart => vec![("stockId", "297"), ("period", "5")],
+            Endpoint::IndexChart => vec![("chartId", "1"), ("period", "5")],
             _ => vec![],
         };
         let raw = match client.raw(endpoint, &form).await {
@@ -50,6 +53,8 @@ async fn main() {
                 Endpoint::MostActive => map::most_active(&raw).map(|m| format!("{} rows", m.len())),
                 Endpoint::CompanyInfo => map::company_quote(&symbol, &raw)
                     .map(|q| format!("{} last {}", q.symbol, q.last)),
+                Endpoint::StockChart => Ok(format!("{} points", map::stock_chart(&raw).len())),
+                Endpoint::IndexChart => Ok(format!("{} points", map::index_chart(&raw).len())),
             };
         match parsed {
             Ok(summary) => println!("{:<20} ok    {summary}", endpoint.path()),

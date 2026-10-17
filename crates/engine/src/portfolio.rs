@@ -243,6 +243,7 @@ mod tests {
                 trades: 0,
                 turnover: Decimal::ZERO,
                 last_traded_at: None,
+                security_id: None,
             },
         )
     }

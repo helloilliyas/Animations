@@ -5,6 +5,7 @@
 //! engine from each refresh, and persists accounts, portfolios, watch lists
 //! and price snapshots in SQLite.
 
+mod chart;
 mod market;
 
 use std::collections::HashMap;
@@ -23,6 +24,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+pub use chart::ASPI_KEY;
 pub use market::{MarketData, MarketView};
 
 const ACCOUNT_KEY: &str = "paper_account";
@@ -57,6 +59,10 @@ struct State {
     real: RealPortfolio,
     market: MarketData,
     last_snapshot: Option<DateTime<Utc>>,
+    /// Day each chart key last fetched its one-year history.
+    synced: HashMap<String, chrono::NaiveDate>,
+    /// Day whose closing prices were last saved to daily history.
+    last_daily_save: Option<chrono::NaiveDate>,
 }
 
 pub struct AppService {
@@ -90,6 +96,8 @@ impl AppService {
                 real,
                 market: MarketData::default(),
                 last_snapshot: None,
+                synced: HashMap::new(),
+                last_daily_save: None,
             }),
             clock,
         })
@@ -205,6 +213,9 @@ impl AppService {
             store.prune_snapshots(now - Duration::days(SNAPSHOT_DAYS))?;
             s.last_snapshot = Some(now);
         }
+        if fresh_quotes {
+            self.save_session_closes(s, &mut store, now)?;
+        }
         // Expiry or queue changes alter the account even without fills.
         store.save_json(ACCOUNT_KEY, &s.account)?;
         Ok(())
@@ -220,6 +231,9 @@ impl AppService {
         if cmd == "refresh" {
             self.refresh().await?;
             return self.dispatch_sync("market", Value::Null);
+        }
+        if cmd == "chart" {
+            return self.chart(args).await;
         }
         if cmd == "quote" {
             // Fetch detail for symbols not in the all-share list (e.g. debt).

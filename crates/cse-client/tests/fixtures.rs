@@ -96,3 +96,40 @@ fn most_active() {
     assert_eq!(active[0].trades, 644);
     assert_eq!(active[0].turnover, dec!(22269067.2));
 }
+
+#[test]
+fn quotes_carry_security_ids() {
+    let quotes = map::quotes(&fixture("tradeSummary")).unwrap();
+    let jkh = quotes.iter().find(|q| q.symbol == "JKH.N0000").unwrap();
+    assert_eq!(jkh.security_id, Some(297));
+    let info = map::company_quote("JKH.N0000", &fixture("companyInfoSummery")).unwrap();
+    assert_eq!(info.security_id, Some(297));
+}
+
+#[test]
+fn stock_chart_daily_and_intraday() {
+    let year = map::stock_chart(&fixture("stockChart-1Y"));
+    assert_eq!(year.len(), 241);
+    assert!(year.windows(2).all(|w| w[0].at <= w[1].at));
+    let last = year.last().unwrap();
+    // Friday 16 Oct 2026 (00:00 Colombo = 15 Oct 18:30 UTC).
+    assert_eq!(last.at.to_rfc3339(), "2026-10-15T18:30:00+00:00");
+    assert_eq!(last.price, dec!(18.0));
+    assert_eq!(last.high, Some(dec!(18.1)));
+    assert_eq!(last.low, Some(dec!(17.9)));
+    assert_eq!(last.volume, Some(1_186_254));
+
+    let day = map::stock_chart(&fixture("stockChart-1D"));
+    assert_eq!(day.len(), 349); // one point per trade, matching 349 trades
+                                // Last trade was 18.10; the official close (18.00) is computed separately.
+    assert_eq!(day.last().unwrap().price, dec!(18.1));
+}
+
+#[test]
+fn aspi_chart() {
+    let year = map::index_chart(&fixture("indexChart-1Y"));
+    assert_eq!(year.len(), 240);
+    assert_eq!(year.last().unwrap().price, dec!(20185.05));
+    let day = map::index_chart(&fixture("indexChart-1D"));
+    assert_eq!(day.len(), 300);
+}

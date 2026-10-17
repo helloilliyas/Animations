@@ -10,7 +10,8 @@ pub mod parse;
 use std::time::Duration;
 
 use cse_core::{
-    ActiveStock, IndexValue, MarketPhase, MarketSummary, Quote, TopMover, TopMoverKind,
+    ActiveStock, ChartPoint, ChartRange, IndexValue, MarketPhase, MarketSummary, Quote, TopMover,
+    TopMoverKind,
 };
 use serde_json::Value;
 
@@ -42,10 +43,14 @@ pub enum Endpoint {
     MostActive,
     /// Detail for one security; needs a `symbol` form field.
     CompanyInfo,
+    /// Price history for one security; needs `stockId` and `period`.
+    StockChart,
+    /// Index history; needs `chartId` (1 = ASPI) and `period`.
+    IndexChart,
 }
 
 impl Endpoint {
-    pub const ALL: [Endpoint; 9] = [
+    pub const ALL: [Endpoint; 11] = [
         Endpoint::MarketStatus,
         Endpoint::Aspi,
         Endpoint::SnpSl20,
@@ -55,6 +60,8 @@ impl Endpoint {
         Endpoint::TopLosers,
         Endpoint::MostActive,
         Endpoint::CompanyInfo,
+        Endpoint::StockChart,
+        Endpoint::IndexChart,
     ];
 
     /// Path on the CSE site; the misspellings are the site's own.
@@ -69,9 +76,26 @@ impl Endpoint {
             Endpoint::TopLosers => "topLooses",
             Endpoint::MostActive => "mostActiveTrades",
             Endpoint::CompanyInfo => "companyInfoSummery",
+            Endpoint::StockChart => "companyChartDataByStock",
+            Endpoint::IndexChart => "chartData",
         }
     }
 }
+
+/// The CSE's `period` value for a range. "All" is served from local history,
+/// so it requests the longest range the CSE has (one year).
+pub fn chart_period(range: ChartRange) -> &'static str {
+    match range {
+        ChartRange::Day => "1",
+        ChartRange::Week => "2",
+        ChartRange::Month => "3",
+        ChartRange::Quarter => "4",
+        ChartRange::Year | ChartRange::All => "5",
+    }
+}
+
+/// CSE chart id for the ASPI index.
+pub const ASPI_CHART_ID: &str = "1";
 
 /// How often to refresh for a given market phase.
 pub fn poll_interval(phase: MarketPhase) -> Duration {
@@ -177,6 +201,33 @@ impl CseClient {
 
     /// Gainers, losers or most active. Turnover and share-volume rankings are
     /// derived from [`CseClient::all_quotes`] instead (see [`top_by`]).
+    /// Price history for a security (its CSE `security_id`), oldest first.
+    pub async fn stock_chart(
+        &self,
+        security_id: u64,
+        range: ChartRange,
+    ) -> Result<Vec<ChartPoint>, Error> {
+        let id = security_id.to_string();
+        let v = self
+            .raw(
+                Endpoint::StockChart,
+                &[("stockId", id.as_str()), ("period", chart_period(range))],
+            )
+            .await?;
+        Ok(map::stock_chart(&v))
+    }
+
+    /// ASPI history, oldest first.
+    pub async fn aspi_chart(&self, range: ChartRange) -> Result<Vec<ChartPoint>, Error> {
+        let v = self
+            .raw(
+                Endpoint::IndexChart,
+                &[("chartId", ASPI_CHART_ID), ("period", chart_period(range))],
+            )
+            .await?;
+        Ok(map::index_chart(&v))
+    }
+
     /// Securities with the most trades today.
     pub async fn most_active(&self) -> Result<Vec<ActiveStock>, Error> {
         map::most_active(&self.raw(Endpoint::MostActive, &[]).await?)
@@ -285,6 +336,7 @@ pub mod map {
             trades: count(v, &["tradevolume", "tradeVolume", "tdyTradeVolume"]),
             turnover: decimal_or_zero(v, &["turnover", "tdyTurnover"]),
             last_traded_at: timestamp(v, &["lastTradedTime", "lastTradedDate", "time"]),
+            security_id: count_opt(v, &["securityId", "id"]),
         })
     }
 
@@ -330,6 +382,48 @@ pub mod map {
             .collect()
     }
 
+    /// `companyChartDataByStock` rows: `t` time, `p` price, `h`/`l` high/low,
+    /// `q` quantity. Rows without a time or price are skipped.
+    pub fn stock_chart(v: &Value) -> Vec<ChartPoint> {
+        sorted(
+            list(v, &["chartData"])
+                .iter()
+                .filter_map(|r| {
+                    Some(ChartPoint {
+                        at: timestamp(r, &["t"])?,
+                        price: decimal(r, &["p"])?,
+                        high: decimal(r, &["h"]),
+                        low: decimal(r, &["l"]),
+                        volume: count_opt(r, &["q"]),
+                    })
+                })
+                .collect(),
+        )
+    }
+
+    /// `chartData` rows: `d` time, `v` index value.
+    pub fn index_chart(v: &Value) -> Vec<ChartPoint> {
+        sorted(
+            list(v, &["chartData", "data"])
+                .iter()
+                .filter_map(|r| {
+                    Some(ChartPoint {
+                        at: timestamp(r, &["d", "t"])?,
+                        price: decimal(r, &["v", "p"])?,
+                        high: None,
+                        low: None,
+                        volume: None,
+                    })
+                })
+                .collect(),
+        )
+    }
+
+    fn sorted(mut points: Vec<ChartPoint>) -> Vec<ChartPoint> {
+        points.sort_by_key(|p| p.at);
+        points
+    }
+
     pub fn movers(v: &Value) -> Result<Vec<TopMover>, Error> {
         list(v, &["data"])
             .iter()
@@ -370,6 +464,7 @@ mod tests {
             trades: 0,
             turnover,
             last_traded_at: None,
+            security_id: None,
         }
     }
 

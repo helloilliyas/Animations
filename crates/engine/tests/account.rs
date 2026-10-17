@@ -38,6 +38,7 @@ fn quotes(rows: &[(&str, Decimal)]) -> HashMap<String, Quote> {
                     trades: 0,
                     turnover: dec!(0),
                     last_traded_at: None,
+                    security_id: None,
                 },
             )
         })

@@ -24,6 +24,9 @@ pub struct Quote {
     pub trades: u64,
     pub turnover: Decimal,
     pub last_traded_at: Option<DateTime<Utc>>,
+    /// CSE's numeric security id, needed to request price history.
+    #[serde(default)]
+    pub security_id: Option<u64>,
 }
 
 /// A market index such as ASPI or S&P SL20.
@@ -61,6 +64,48 @@ pub struct TopMover {
     pub price: Decimal,
     pub change: Decimal,
     pub change_pct: Decimal,
+}
+
+/// A point on a price chart: one trade (intraday) or one day's close.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ChartPoint {
+    pub at: DateTime<Utc>,
+    /// Trade price, closing price or index value.
+    pub price: Decimal,
+    pub high: Option<Decimal>,
+    pub low: Option<Decimal>,
+    /// Shares traded (per trade intraday, per day for daily points).
+    pub volume: Option<u64>,
+}
+
+/// Chart time ranges the CSE serves (and "All" from local history).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ChartRange {
+    #[serde(rename = "1D")]
+    Day,
+    #[serde(rename = "1W")]
+    Week,
+    #[serde(rename = "1M")]
+    Month,
+    #[serde(rename = "3M")]
+    Quarter,
+    #[serde(rename = "1Y")]
+    Year,
+    #[serde(rename = "All")]
+    All,
+}
+
+impl ChartRange {
+    /// Calendar days covered by a daily range; `None` for intraday or all.
+    pub fn days(self) -> Option<i64> {
+        match self {
+            ChartRange::Day | ChartRange::All => None,
+            ChartRange::Week => Some(7),
+            ChartRange::Month => Some(31),
+            ChartRange::Quarter => Some(92),
+            ChartRange::Year => Some(366),
+        }
+    }
 }
 
 /// One row of the most-active list (ranked by number of trades).
