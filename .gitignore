@@ -1,0 +1,8 @@
+# Never commit third-party app binaries or analysis dumps
+*.apk
+*.apks
+*.xapk
+*.rar
+*.7z*
+*.hasm
+/target/
