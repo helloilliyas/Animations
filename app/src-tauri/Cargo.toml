@@ -1,0 +1,28 @@
+[package]
+name = "cse-trader"
+version = "0.1.0"
+description = "Paper trading and portfolio tracking for the Colombo Stock Exchange"
+edition = "2021"
+license = "MIT"
+publish = false
+
+# Built on its own (needs WebView/Android toolchains), not part of the root workspace.
+[workspace]
+
+[lib]
+name = "cse_trader_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+cse-service = { path = "../../crates/service" }
+serde_json = "1"
+tauri = { version = "2", features = [] }
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true

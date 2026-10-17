@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0d1b2a">
+  <title>CSE Trader</title>
+  <link rel="icon" href="favicon.svg">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">CSE Trader <span class="paper-chip">PAPER</span></div>
+    <div class="status" id="status"><span class="dot"></span><span id="status-text">…</span></div>
+    <button class="icon-btn" id="open-settings" aria-label="Settings">⚙</button>
+  </header>
+
+  <main id="view" aria-live="polite"></main>
+
+  <div id="sheet" class="sheet hidden" role="dialog" aria-modal="true">
+    <div class="sheet-body" id="sheet-body"></div>
+  </div>
+  <div id="toast" class="toast hidden"></div>
+
+  <nav class="tabbar">
+    <button data-tab="market" class="active"><span class="ti">◷</span>Market</button>
+    <button data-tab="watch"><span class="ti">☰</span>Watch</button>
+    <button data-tab="trade"><span class="ti">⇅</span>Buy/Sell</button>
+    <button data-tab="orders"><span class="ti">▤</span>Orders</button>
+    <button data-tab="portfolio"><span class="ti">◔</span>Portfolio</button>
+  </nav>
+
+  <script src="app.js"></script>
+</body>
+</html>

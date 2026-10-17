@@ -6,3 +6,4 @@
 *.7z*
 *.hasm
 /target/
+cse-trader-dev.sqlite*
