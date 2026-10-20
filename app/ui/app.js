@@ -704,7 +704,33 @@ function mountPortfolio(root) {
 
 // ---------- Alerts ----------
 // Android-only bridge to the background service (see MainActivity.kt).
-const bgBridge = () => window.CseBackground || null;
+const bgBridge = (() => {
+  let api;
+  return () => {
+    if (api !== undefined) return api;
+    const port = window.CseBackgroundPort;
+    if (!port) return (api = null);
+    let seq = 0;
+    const waiting = new Map();
+    port.onmessage = (e) => {
+      const m = JSON.parse(e.data);
+      const done = waiting.get(m.id);
+      if (done) { waiting.delete(m.id); done(m.result); }
+    };
+    const send = (cmd, extra = {}) => new Promise((resolve) => {
+      const id = ++seq;
+      waiting.set(id, resolve);
+      port.postMessage(JSON.stringify({ id, cmd, ...extra }));
+    });
+    return (api = {
+      start: (path) => send("start", { path }),
+      stop: () => send("stop"),
+      isRunning: () => send("isRunning"),
+      wanted: () => send("wanted"),
+      notify: (id, title, body) => send("notify", { nid: Number(id), title, body }),
+    });
+  };
+})();
 let lastAlertId = prefGet("lastAlertId", null);
 let unseenAlerts = prefGet("unseenAlerts", 0);
 function setBellDot() { $("#open-alerts").classList.toggle("has-new", unseenAlerts > 0); }
@@ -718,7 +744,7 @@ async function checkAlerts() {
     toast(`🔔 ${title}: ${a.message}`);
     if (bridge) {
       // The background service posts its own notifications while running.
-      if (!bridge.isRunning()) bridge.notify(String(a.id), title, a.message);
+      if (!(await bridge.isRunning())) await bridge.notify(a.id, title, a.message);
     } else if ("Notification" in window && Notification.permission === "granted") {
       try { new Notification(title, { body: a.message }); } catch { /* ignore */ }
     }
@@ -784,7 +810,16 @@ function favouriteCard(f, v) {
 }
 
 async function renderAlerts() {
-  const v = await call("alerts");
+  let v = await call("alerts");
+  const br = bgBridge();
+  if (br) {
+    const running = await br.isRunning();
+    if (running !== v.background) {
+      await call("update_alert_config", { background: running });
+      v = { ...v, background: running };
+    }
+  }
+
   unseenAlerts = 0; prefSet("unseenAlerts", 0); setBellDot();
   const bridge = bgBridge();
   const chips = Object.keys(v.labels).map((k) =>
@@ -826,7 +861,7 @@ function mountAlerts(root) {
     const bridge = bgBridge();
     if (!bridge) return;
     try {
-      if (on) bridge.start(await call("outbox_path") || ""); else bridge.stop();
+      if (on) await bridge.start((await call("outbox_path")) || ""); else await bridge.stop();
       await call("update_alert_config", { background: on });
       toast(on ? "Background mode on" : "Background mode off");
     } catch (err) { e.target.checked = !on; toast(String(err.message || err), true); }
@@ -867,6 +902,17 @@ function openCustomAlert(symbol) {
   });
 }
 $("#open-alerts").onclick = () => switchTab("alerts");
+
+// On launch, restore background mode if it was on and Android stopped it
+// (e.g. after a restart), but not if the user tapped Stop.
+async function restoreBackground() {
+  const br = bgBridge();
+  if (!br) return;
+  const cfg = await call("alerts");
+  if (!cfg.background || (await br.isRunning())) return;
+  if (await br.wanted()) await br.start((await call("outbox_path")) || "");
+  else await call("update_alert_config", { background: false });
+}
 
 // ---------- Settings ----------
 async function openSettings() {
@@ -968,6 +1014,7 @@ async function poll() {
 (async function init() {
   try { await call("refresh"); } catch { /* poll will retry */ }
   await loadWatchLists().catch(() => {});
+  restoreBackground().catch(() => {});
   await poll();
   render();
   setInterval(poll, 5000);
