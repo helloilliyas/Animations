@@ -199,6 +199,8 @@ impl AppService {
             Err(e) => note("most active", &e),
         }
         let fresh_quotes = match quotes {
+            // Before the open the CSE serves an empty list: keep the last prices.
+            Ok(v) if v.is_empty() && !m.quotes.is_empty() => false,
             Ok(v) => {
                 m.quotes = v.into_iter().map(|q| (q.symbol.clone(), q)).collect();
                 true

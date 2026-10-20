@@ -27,6 +27,8 @@ function fmt(v, dp = 2) {
   return n.toLocaleString("en-US", { minimumFractionDigits: dp, maximumFractionDigits: dp });
 }
 const fmtInt = (v) => fmt(v, 0);
+// Share counts: whole numbers, abbreviated from a million.
+const fmtVol = (v) => (num(v) >= 1e6 ? fmtBig(v) : fmtInt(v));
 function fmtBig(v) {
   const n = num(v);
   if (Number.isNaN(n)) return "–";
@@ -700,6 +702,172 @@ function mountPortfolio(root) {
   };
 }
 
+// ---------- Alerts ----------
+// Android-only bridge to the background service (see MainActivity.kt).
+const bgBridge = () => window.CseBackground || null;
+let lastAlertId = prefGet("lastAlertId", null);
+let unseenAlerts = prefGet("unseenAlerts", 0);
+function setBellDot() { $("#open-alerts").classList.toggle("has-new", unseenAlerts > 0); }
+
+async function checkAlerts() {
+  const r = await call("alerts_pending", { after_id: lastAlertId ?? 0 });
+  if (lastAlertId === null) { lastAlertId = r.latest_id; prefSet("lastAlertId", lastAlertId); return; }
+  const bridge = bgBridge();
+  for (const a of r.alerts) {
+    const title = `${a.symbol} · ${a.kind}`;
+    toast(`🔔 ${title}: ${a.message}`);
+    if (bridge) {
+      // The background service posts its own notifications while running.
+      if (!bridge.isRunning()) bridge.notify(String(a.id), title, a.message);
+    } else if ("Notification" in window && Notification.permission === "granted") {
+      try { new Notification(title, { body: a.message }); } catch { /* ignore */ }
+    }
+  }
+  if (r.alerts.length) {
+    lastAlertId = r.latest_id; prefSet("lastAlertId", lastAlertId);
+    if (state.tab !== "alerts") { unseenAlerts += r.alerts.length; prefSet("unseenAlerts", unseenAlerts); }
+    setBellDot();
+    if (state.tab === "alerts") render();
+  }
+}
+
+function recordLine(r) {
+  if (!r || !r.fired) return `<span class="muted">No signals in the past year</span>`;
+  return `<span class="${r.win_rate_pct >= 50 ? "up" : "down"}">${r.wins}/${r.fired} beat fees (${fmt(r.win_rate_pct, 0)}%)</span>
+    · avg ${signed(r.avg_return_pct)}% after ${r.horizon_days} days`;
+}
+function distance(price, level) {
+  if (!price || !level) return "";
+  const d = (num(level) / num(price) - 1) * 100;
+  return `<span class="muted small">(${d >= 0 ? "+" : ""}${fmt(d, 1)}% away)</span>`;
+}
+function favouriteCard(f, v) {
+  const L = f.levels, recs = {};
+  (f.records || []).forEach((r) => (recs[r.kind] = r));
+  const on = (k) => v.signals[k] !== false;
+  const row = (kind, title, valueHtml, detail) => `
+    <div class="sig ${on(kind) ? "" : "off"}">
+      <div class="sig-head"><b>${title}</b><span class="num">${valueHtml}</span></div>
+      ${detail ? `<div class="small muted">${detail}</div>` : ""}
+      ${recs[kind] ? `<div class="small">${recordLine(recs[kind])}</div>` : ""}
+    </div>`;
+  let body;
+  if (f.pending) body = `<div class="small muted">Preparing levels… (needs the market data refresh)</div>`;
+  else if (!L) body = `<div class="small muted">${esc(f.error || "Not enough history yet")}</div>`;
+  else {
+    const I = f.intraday;
+    body = (L.liquid ? "" : `<div class="banner">Thinly traded (avg turnover Rs. ${fmtBig(L.avg_turnover)}/day) — signals are off for this stock.</div>`) +
+      row("Breakout", "Breakout above", `${fmt(L.breakout_level)} ${distance(f.price, L.breakout_level)}`,
+        `20-day high + buffer, with volume above ${fmtVol(L.breakout_volume)} shares/day`) +
+      row("Pullback", "Pullback to", L.pullback_level ? `${fmt(L.pullback_level)} ${distance(f.price, L.pullback_level)}` : "—",
+        L.uptrend ? "20-day average, while in an uptrend" : "Not in an uptrend (price or 20-day average below 50-day)") +
+      row("TrendTurn", "Trend turn at", L.trend_turn_level ? `${fmt(L.trend_turn_level)} ${distance(f.price, L.trend_turn_level)}` : "—",
+        L.sma_fast > L.sma_slow ? "20-day average already above the 50-day"
+          : `20-day avg ${fmt(L.sma_fast)} below 50-day ${fmt(L.sma_slow)}${L.trend_turn_level ? "" : " — crossing is far off"}`) +
+      row("OversoldBounce", "Oversold bounce at", L.oversold_level ? `${fmt(L.oversold_level)} ${distance(f.price, L.oversold_level)}` : "—",
+        `RSI(14) ${fmt(L.rsi, 0)}${L.oversold_level ? " — below 30" : " — not oversold"}`) +
+      row("OpeningRange", "Opening range breakout",
+        I && I.breakout_level ? fmt(I.breakout_level) : "—",
+        I ? (I.moves_cover_fees ? `09:30–10:00 high ${fmt(I.opening_high)}` : "Typical daily move too small to cover fees — off")
+          : "Checked during market hours") +
+      row("VolumeSpike", "Volume spike", I ? `> ${fmtVol(I.avg_bar_volume * v.params.spike_mult)} shares` : "—",
+        `${fmt(v.params.spike_mult, 0)}× usual volume in a rising 15-minute bar`);
+  }
+  return `<div class="card fav-card">
+    <div class="fav-head" data-symbol="${esc(f.symbol)}">
+      <div><b>${esc(f.symbol)}</b><div class="small muted">${esc(f.name || "")}</div></div>
+      <div class="right"><div class="num">${fmt(f.price)}</div><div class="small num ${dir(f.change_pct)}">${f.change_pct != null ? pct(f.change_pct) : ""}</div></div>
+    </div>
+    ${body}
+    <div class="btn-row"><button class="btn small ghost" data-custom="${esc(f.symbol)}">+ My own price alert</button></div>
+  </div>`;
+}
+
+async function renderAlerts() {
+  const v = await call("alerts");
+  unseenAlerts = 0; prefSet("unseenAlerts", 0); setBellDot();
+  const bridge = bgBridge();
+  const chips = Object.keys(v.labels).map((k) =>
+    `<button class="chip ${v.signals[k] !== false ? "on" : ""}" data-sig="${k}">${esc(v.labels[k])}</button>`).join("");
+  return `
+    <div class="card">
+      <label class="switch-row"><span><b>Alerts</b><br><span class="small muted">Signals for stocks in your watch lists</span></span>
+        <input type="checkbox" id="al-enabled" ${v.enabled ? "checked" : ""}></label>
+      <label class="switch-row"><span><b>Background mode</b><br><span class="small muted">
+        ${bridge ? "Keep checking 9:30–2:30 when the app is closed. Shows a small permanent notification while on."
+                 : "Available in the Android app."}</span></span>
+        <input type="checkbox" id="al-bg" ${v.background ? "checked" : ""} ${bridge ? "" : "disabled"}></label>
+    </div>
+    <h2>Signals</h2>
+    <div class="chips">${chips}</div>
+    <h2>Favourites</h2>
+    ${v.favourites.length ? v.favourites.map((f) => favouriteCard(f, v)).join("")
+      : `<div class="card empty">No favourites yet. Open a stock and tap ☆ to add it to a watch list.</div>`}
+    <h2>My price alerts</h2>
+    <div class="list">${v.custom.length ? v.custom.map((c) => `
+      <div class="row" style="cursor:default"><div><b>${esc(c.symbol)}</b>
+        <div class="sub">${c.above ? "Rises to or above" : "Falls to or below"} ${fmt(c.price)}</div></div>
+        <div class="right small ${c.active ? "up" : "muted"}">${c.active ? "Active" : "Triggered"}</div>
+        <button class="btn small ghost" data-delcustom="${c.id}" aria-label="Delete">✕</button></div>`).join("")
+      : `<div class="empty">None. Use “+ My own price alert” on a favourite.</div>`}</div>
+    <h2>Alert history</h2>
+    <div class="list">${v.history.length ? v.history.map((a) => `
+      <div class="row" data-symbol="${esc(a.symbol)}"><div><b>${esc(a.symbol)}</b> <span class="small">${esc(a.kind)}</span>
+        <div class="sub">${esc(a.message)}</div></div>
+        <div class="right num small">${fmt(a.price)}</div><div class="right small muted">${timeStr(a.at)}</div></div>`).join("")
+      : `<div class="empty">No alerts yet. Signals are checked during market hours.</div>`}</div>
+    ${v.history.length ? `<div class="btn-row"><button class="btn small ghost" id="al-clear">Clear history</button></div>` : ""}
+    <p class="muted small">Signals are prompts to look at a stock, not buy recommendations. Track records show how each signal did on that stock over the past year, after ~${fmt(v.params.round_trip_fee_pct)}% buy+sell fees.</p>`;
+}
+function mountAlerts(root) {
+  $("#al-enabled", root).onchange = (e) => attempt(() => call("update_alert_config", { enabled: e.target.checked }));
+  $("#al-bg", root).onchange = async (e) => {
+    const on = e.target.checked;
+    const bridge = bgBridge();
+    if (!bridge) return;
+    try {
+      if (on) bridge.start(await call("outbox_path") || ""); else bridge.stop();
+      await call("update_alert_config", { background: on });
+      toast(on ? "Background mode on" : "Background mode off");
+    } catch (err) { e.target.checked = !on; toast(String(err.message || err), true); }
+  };
+  $$("[data-sig]", root).forEach((b) => (b.onclick = async () => {
+    const on = !b.classList.contains("on");
+    await attempt(() => call("update_alert_config", { signals: { [b.dataset.sig]: on } }));
+    render();
+  }));
+  $$("[data-custom]", root).forEach((b) => (b.onclick = () => openCustomAlert(b.dataset.custom)));
+  $$("[data-delcustom]", root).forEach((b) => (b.onclick = async () => {
+    await attempt(() => call("remove_custom_alert", { id: Number(b.dataset.delcustom) }), "Alert removed");
+    render();
+  }));
+  $$(".fav-head", root).forEach((h) => (h.onclick = () => openQuote(h.dataset.symbol)));
+  const clear = $("#al-clear", root);
+  if (clear) clear.onclick = async () => { await attempt(() => call("clear_alert_history")); render(); };
+}
+function openCustomAlert(symbol) {
+  const q = state.quotes.find((x) => x.symbol === symbol);
+  openSheet(`
+    <div class="sheet-head"><h3>Price alert · ${esc(symbol)}</h3><button class="icon-btn" data-close>✕</button></div>
+    <p class="muted small">Current price ${fmt(q && q.last)}. Fires once, during market hours.</p>
+    <div class="side-toggle"><button class="buy active" data-dir="up">Rises to</button><button class="sell" data-dir="down">Falls to</button></div>
+    <label>Price</label><input id="ca-price" type="number" inputmode="decimal" step="0.05" value="${q ? esc(num(q.last)) : ""}">
+    <div class="btn-row"><button class="btn primary" id="ca-save">Create alert</button></div>`, (s) => {
+    let above = true;
+    $$(".side-toggle button", s).forEach((b) => (b.onclick = () => {
+      above = b.dataset.dir === "up";
+      $$(".side-toggle button", s).forEach((x) => x.classList.toggle("active", x === b));
+    }));
+    $("#ca-save", s).onclick = async () => {
+      const price = String($("#ca-price", s).value || "");
+      if (!price) return;
+      await attempt(() => call("add_custom_alert", { symbol, above, price }), "Alert created");
+      closeSheet(); render();
+    };
+  });
+}
+$("#open-alerts").onclick = () => switchTab("alerts");
+
 // ---------- Settings ----------
 async function openSettings() {
   const [settings, account] = await Promise.all([call("settings"), call("account")]);
@@ -756,6 +924,7 @@ const views = {
   trade: [renderTrade, mountTrade],
   orders: [renderOrders, mountOrders],
   portfolio: [renderPortfolio, mountPortfolio],
+  alerts: [renderAlerts, mountAlerts],
 };
 let renderSeq = 0;
 async function render() {
@@ -790,6 +959,7 @@ async function poll() {
     const sheetOpen = !$("#sheet").classList.contains("hidden");
     if (!typing && !sheetOpen && ["market", "watch", "portfolio"].includes(state.tab)) render();
     if (state.tab === "trade") updateEstimate();
+    checkAlerts().catch(() => {});
   } catch (e) {
     $("#status-text").textContent = "Offline";
   }

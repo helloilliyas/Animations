@@ -91,6 +91,9 @@ pub struct Params {
     pub fee_aware: bool,
     pub opening_range_minutes: i64,
     pub spike_mult: f64,
+    /// Trend-turn levels further than this (percent above the last close)
+    /// are unreachable in a session and are not offered.
+    pub max_level_distance_pct: f64,
 }
 
 impl Default for Params {
@@ -110,6 +113,7 @@ impl Default for Params {
             fee_aware: true,
             opening_range_minutes: 30,
             spike_mult: 3.0,
+            max_level_distance_pct: 10.0,
         }
     }
 }
@@ -207,7 +211,8 @@ pub fn daily_levels(bars: &[Bar], p: &Params) -> Option<DailyLevels> {
             (ss / s - sf / f) / (1.0 / f - 1.0 / s)
         })
         .filter(|x| *x > 0.0)
-        .map(|x| x * buf);
+        .map(|x| x * buf)
+        .filter(|x| *x <= last.close * (1.0 + p.max_level_distance_pct / 100.0));
 
     let (_, rsi_state) = rsi(&c, p.rsi_period);
     let rsi_now = rsi_state.map_or(50.0, |s| s.value());
@@ -590,10 +595,17 @@ mod tests {
         bars.extend((40..60).map(|i| bar(i, 12.0, 1000.0)));
         let p = Params {
             buffer_pct: 0.0,
+            max_level_distance_pct: 1000.0,
             ..params()
         };
         let l = daily_levels(&bars, &p).unwrap();
         let x = l.trend_turn_level.unwrap();
+        // With the default 10% cap this far-off level is not offered.
+        assert!(x > 12.0 * 1.1);
+        assert!(daily_levels(&bars, &params())
+            .unwrap()
+            .trend_turn_level
+            .is_none());
         // Appending x makes the averages equal; a little above crosses.
         let mut c: Vec<f64> = bars.iter().map(|b| b.close).collect();
         c.push(x + 0.01);

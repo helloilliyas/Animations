@@ -493,3 +493,31 @@ async fn no_live_alerts_when_market_closed() {
     let view = h.call("alerts", Value::Null).await;
     assert!(view["favourites"][0]["levels"]["breakout_level"].is_number());
 }
+
+#[tokio::test]
+async fn empty_pre_open_price_list_keeps_last_prices() {
+    // Yesterday's prices, as the app would have cached them.
+    let full = Harness::new("Market Closed", lk_on(16, 15, 0)).await;
+    full.call("refresh", Value::Null).await;
+    let cached: Vec<cse_core::Quote> =
+        serde_json::from_value(full.call("quotes", Value::Null).await).unwrap();
+    assert_eq!(cached.len(), 279);
+
+    // Next morning the CSE serves an empty list before the open.
+    let mut r = routes("Pre Trading");
+    r.insert("tradeSummary", r#"{"reqTradeSummery":[]}"#.to_owned());
+    let h = Harness::with_routes(r, lk_on(19, 9, 10)).await;
+    h.svc.set_market(cse_service::MarketData {
+        quotes: cached.into_iter().map(|q| (q.symbol.clone(), q)).collect(),
+        ..Default::default()
+    });
+    h.call("refresh", Value::Null).await;
+    assert_eq!(
+        h.call("quotes", Value::Null)
+            .await
+            .as_array()
+            .unwrap()
+            .len(),
+        279
+    );
+}
