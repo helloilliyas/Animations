@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
 exclude = ["app/src-tauri"]
-members = ["crates/core", "crates/cse-client", "crates/engine", "crates/service", "crates/storage", "crates/dev-server"]
+members = ["crates/core", "crates/cse-client", "crates/engine", "crates/service", "crates/signals", "crates/storage", "crates/dev-server"]
 
 [workspace.package]
 edition = "2021"
@@ -15,6 +15,7 @@ cse-engine = { path = "crates/engine" }
 cse-storage = { path = "crates/storage" }
 cse-client = { path = "crates/cse-client" }
 cse-service = { path = "crates/service" }
+cse-signals = { path = "crates/signals" }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
 rust_decimal = { version = "1", features = ["serde-with-float", "serde-with-str"] }
 rust_decimal_macros = "1"

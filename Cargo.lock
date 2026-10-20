@@ -275,6 +275,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "cse-signals"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "cse-storage"
 version = "0.1.0"
 dependencies = [
