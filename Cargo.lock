@@ -265,6 +265,7 @@ dependencies = [
  "cse-client",
  "cse-core",
  "cse-engine",
+ "cse-signals",
  "cse-storage",
  "rust_decimal",
  "rust_decimal_macros",

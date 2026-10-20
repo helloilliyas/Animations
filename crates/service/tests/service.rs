@@ -105,6 +105,7 @@ fn lk_on(d: u32, h: u32, m: u32) -> DateTime<Utc> {
 struct Harness {
     svc: AppService,
     clock: Arc<Mutex<DateTime<Utc>>>,
+    outbox: std::path::PathBuf,
 }
 
 impl Harness {
@@ -118,13 +119,21 @@ impl Harness {
         let base = stub(routes).await;
         let clock = Arc::new(Mutex::new(at));
         let c = clock.clone();
+        static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let outbox = std::env::temp_dir().join(format!(
+            "cse-outbox-{}-{}.jsonl",
+            std::process::id(),
+            N.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+        ));
+        let _ = std::fs::remove_file(&outbox);
         let svc = AppService::with(
             Store::open_in_memory().unwrap(),
             CseClient::new(base).with_retries(0),
             Arc::new(move || *c.lock().unwrap()),
         )
-        .unwrap();
-        Self { svc, clock }
+        .unwrap()
+        .with_outbox(&outbox);
+        Self { svc, clock, outbox }
     }
 
     async fn call(&self, cmd: &str, args: Value) -> Value {
@@ -363,4 +372,124 @@ async fn session_closes_are_stored_and_survive_cse_outages() {
         .await;
     assert_eq!(day["source"], "local");
     assert!(day["error"].is_string());
+}
+
+/// Real price list with JKH changed to a breakout: price 25.00 on 50M shares.
+fn breakout_trade_summary() -> String {
+    let mut v: Value = serde_json::from_str(&fixture("tradeSummary")).unwrap();
+    for q in v["reqTradeSummery"].as_array_mut().unwrap() {
+        if q["symbol"] == "JKH.N0000" {
+            q["price"] = json!(25.0);
+            q["high"] = json!(25.0);
+            q["low"] = json!(24.0);
+            q["sharevolume"] = json!(50_000_000);
+        }
+    }
+    v.to_string()
+}
+
+#[tokio::test]
+async fn alerts_fire_for_favourites_and_custom_levels() {
+    let mut r = routes("Market Open");
+    chart_routes(&mut r);
+    r.insert("tradeSummary", breakout_trade_summary());
+    // Friday 16 Oct 11:00, a trading day matching the fixture's trades.
+    let h = Harness::with_routes(r, lk_on(16, 11, 0)).await;
+
+    let wl = h
+        .call("create_watch_list", json!({"name": "Favourites"}))
+        .await;
+    h.call(
+        "add_to_watch_list",
+        json!({"id": wl["id"], "symbol": "JKH.N0000"}),
+    )
+    .await;
+    h.call(
+        "add_custom_alert",
+        json!({"symbol": "COMB.N0000", "above": true, "price": "150"}),
+    )
+    .await;
+
+    h.call("refresh", Value::Null).await;
+    let pending = h.call("alerts_pending", json!({"after_id": 0})).await;
+    let alerts = pending["alerts"].as_array().unwrap();
+    let kinds: Vec<(&str, &str)> = alerts
+        .iter()
+        .map(|a| (a["symbol"].as_str().unwrap(), a["kind"].as_str().unwrap()))
+        .collect();
+    assert!(kinds.contains(&("JKH.N0000", "Breakout")), "{kinds:?}");
+    assert!(kinds.contains(&("COMB.N0000", "Custom")), "{kinds:?}");
+    let latest = pending["latest_id"].as_u64().unwrap();
+
+    // The outbox holds one line per alert for the Android service.
+    let outbox = std::fs::read_to_string(&h.outbox).unwrap();
+    assert_eq!(outbox.lines().count(), alerts.len());
+    assert!(outbox.contains("JKH.N0000 · Breakout"));
+
+    // A minute later nothing repeats: cooldown, and custom alerts are one-shot.
+    h.set_time(lk_on(16, 11, 1));
+    h.call("refresh", Value::Null).await;
+    let again = h
+        .call("alerts_pending", json!({ "after_id": latest }))
+        .await;
+    assert!(again["alerts"].as_array().unwrap().is_empty());
+
+    let view = h.call("alerts", Value::Null).await;
+    let fav = &view["favourites"][0];
+    assert_eq!(fav["symbol"], "JKH.N0000");
+    assert!(fav["levels"]["breakout_level"].as_f64().unwrap() > 18.0);
+    assert_eq!(fav["records"].as_array().unwrap().len(), 4);
+    assert_eq!(fav["history_days"], 240); // today's bar excluded
+    assert!(fav["intraday"]["opening_high"].is_number());
+    assert_eq!(view["custom"][0]["active"], false);
+    assert_eq!(view["history"].as_array().unwrap().len(), alerts.len());
+}
+
+#[tokio::test]
+async fn alert_settings_switch_signals_off() {
+    let mut r = routes("Market Open");
+    chart_routes(&mut r);
+    r.insert("tradeSummary", breakout_trade_summary());
+    let h = Harness::with_routes(r, lk_on(16, 11, 0)).await;
+    let wl = h.call("create_watch_list", json!({"name": "Fav"})).await;
+    h.call(
+        "add_to_watch_list",
+        json!({"id": wl["id"], "symbol": "JKH.N0000"}),
+    )
+    .await;
+    h.call(
+        "update_alert_config",
+        json!({"signals": {"Breakout": false}, "background": true}),
+    )
+    .await;
+    h.call("refresh", Value::Null).await;
+    let pending = h.call("alerts_pending", json!({})).await;
+    assert!(!pending["alerts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|a| a["kind"] == "Breakout"));
+    let view = h.call("alerts", Value::Null).await;
+    assert_eq!(view["background"], true);
+    assert_eq!(view["signals"]["Breakout"], false);
+}
+
+#[tokio::test]
+async fn no_live_alerts_when_market_closed() {
+    let mut r = routes("Market Closed");
+    chart_routes(&mut r);
+    r.insert("tradeSummary", breakout_trade_summary());
+    let h = Harness::with_routes(r, lk_on(17, 11, 0)).await; // Saturday
+    let wl = h.call("create_watch_list", json!({"name": "Fav"})).await;
+    h.call(
+        "add_to_watch_list",
+        json!({"id": wl["id"], "symbol": "JKH.N0000"}),
+    )
+    .await;
+    h.call("refresh", Value::Null).await;
+    let pending = h.call("alerts_pending", json!({})).await;
+    assert!(pending["alerts"].as_array().unwrap().is_empty());
+    // Levels are still prepared for the next session.
+    let view = h.call("alerts", Value::Null).await;
+    assert!(view["favourites"][0]["levels"]["breakout_level"].is_number());
 }

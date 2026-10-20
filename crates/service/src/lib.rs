@@ -5,6 +5,7 @@
 //! engine from each refresh, and persists accounts, portfolios, watch lists
 //! and price snapshots in SQLite.
 
+mod alerts;
 mod chart;
 mod market;
 
@@ -63,6 +64,8 @@ struct State {
     synced: HashMap<String, chrono::NaiveDate>,
     /// Day whose closing prices were last saved to daily history.
     last_daily_save: Option<chrono::NaiveDate>,
+    alerts: alerts::AlertBook,
+    analysis: HashMap<String, alerts::Analysis>,
 }
 
 pub struct AppService {
@@ -70,16 +73,27 @@ pub struct AppService {
     store: Mutex<Store>,
     state: RwLock<State>,
     clock: Clock,
+    /// File the Android background service reads alert notifications from.
+    outbox: Option<std::path::PathBuf>,
 }
 
 impl AppService {
     /// Opens (or creates) the database at `db_path`.
     pub fn open(db_path: impl AsRef<Path>) -> Result<Self> {
-        Self::with(
+        let outbox = alerts::outbox_beside(db_path.as_ref());
+        let mut svc = Self::with(
             Store::open(db_path)?,
             CseClient::default(),
             Arc::new(Utc::now),
-        )
+        )?;
+        svc.outbox = Some(outbox);
+        Ok(svc)
+    }
+
+    /// Writes fired alerts to `path` (one JSON object per line).
+    pub fn with_outbox(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+        self.outbox = Some(path.into());
+        self
     }
 
     pub fn with(store: Store, client: CseClient, clock: Clock) -> Result<Self> {
@@ -88,6 +102,7 @@ impl AppService {
             .load_json(ACCOUNT_KEY)?
             .unwrap_or_else(|| Account::new(DEFAULT_STARTING_CASH, Settings::default(), now));
         let real = store.load_json(REAL_KEY)?.unwrap_or_default();
+        let alert_book = store.load_json(alerts::ALERTS_KEY)?.unwrap_or_default();
         Ok(Self {
             client,
             store: Mutex::new(store),
@@ -98,8 +113,11 @@ impl AppService {
                 last_snapshot: None,
                 synced: HashMap::new(),
                 last_daily_save: None,
+                alerts: alert_book,
+                analysis: HashMap::new(),
             }),
             clock,
+            outbox: None,
         })
     }
 
@@ -129,6 +147,11 @@ impl AppService {
     /// Fetches all feeds, updates the cache, fills paper orders and stores
     /// snapshots. Individual feed failures are recorded, not fatal.
     pub async fn refresh(&self) -> Result<()> {
+        self.refresh_market().await?;
+        self.update_alerts().await
+    }
+
+    async fn refresh_market(&self) -> Result<()> {
         let c = &self.client;
         let (status, aspi, snp, summary, quotes, gainers, losers, active) = tokio::join!(
             c.market_status(),
@@ -234,6 +257,9 @@ impl AppService {
         }
         if cmd == "chart" {
             return self.chart(args).await;
+        }
+        if let Some(r) = self.alerts_command(cmd, args.clone()) {
+            return r;
         }
         if cmd == "quote" {
             // Fetch detail for symbols not in the all-share list (e.g. debt).
@@ -465,7 +491,7 @@ impl AppService {
     }
 }
 
-fn parse<T: DeserializeOwned>(args: Value) -> Result<T> {
+pub(crate) fn parse<T: DeserializeOwned>(args: Value) -> Result<T> {
     serde_json::from_value(args).map_err(|e| ServiceError::BadArgs(e.to_string()))
 }
 

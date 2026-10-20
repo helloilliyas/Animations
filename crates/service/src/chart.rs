@@ -24,7 +24,7 @@ pub(crate) fn lk_day(at: DateTime<Utc>) -> NaiveDate {
     at.with_timezone(&colombo()).date_naive()
 }
 
-fn lk_midnight(day: NaiveDate) -> DateTime<Utc> {
+pub(crate) fn lk_midnight(day: NaiveDate) -> DateTime<Utc> {
     colombo()
         .from_local_datetime(&day.and_hms_opt(0, 0, 0).unwrap())
         .unwrap()
@@ -160,7 +160,7 @@ impl AppService {
         }))
     }
 
-    async fn fetch_year(&self, symbol: Option<&str>) -> Result<Vec<ChartPoint>> {
+    pub(crate) async fn fetch_year(&self, symbol: Option<&str>) -> Result<Vec<ChartPoint>> {
         Ok(match symbol {
             None => self.client.aspi_chart(ChartRange::Year).await?,
             Some(sym) => {
@@ -170,7 +170,10 @@ impl AppService {
         })
     }
 
-    async fn security_id(&self, symbol: &str) -> std::result::Result<u64, cse_client::Error> {
+    pub(crate) async fn security_id(
+        &self,
+        symbol: &str,
+    ) -> std::result::Result<u64, cse_client::Error> {
         let cached = self
             .state
             .read()
