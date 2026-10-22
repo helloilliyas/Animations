@@ -9,6 +9,7 @@ use std::path::PathBuf;
 
 use chrono::{DateTime, Duration, NaiveDate, Utc};
 use cse_core::{ChartRange, MarketPhase};
+use cse_signals::structure::{self, Status, Structure};
 use cse_signals::{
     daily_levels, evaluate_daily, evaluate_intraday, track_record, Bar, DailyLevels,
     IntradayLevels, Live, Params, SignalKind, TrackRecord, Trigger,
@@ -22,9 +23,14 @@ use crate::chart::{lk_day, lk_midnight};
 use crate::{parse, AppService, Result};
 
 pub(crate) const ALERTS_KEY: &str = "alerts";
+/// Day each symbol last downloaded its one-year history (kept between runs
+/// so scheduled checks do not re-download it).
+pub(crate) const SYNCED_KEY: &str = "synced_days";
+/// Alert settings format; v2 made market structure the default method.
+const BOOK_VERSION: u32 = 2;
 const HISTORY_LIMIT: usize = 200;
 /// Daily histories fetched per refresh, to spread requests out.
-const SYNCS_PER_REFRESH: usize = 4;
+const SYNCS_PER_REFRESH: usize = 10;
 /// Minutes between intraday trade fetches per stock.
 const INTRADAY_EVERY_MIN: i64 = 5;
 
@@ -51,6 +57,22 @@ pub struct FiredAlert {
     pub message: String,
 }
 
+/// How prices are checked when the app is closed (Android).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum BackgroundMode {
+    #[default]
+    #[serde(rename = "off")]
+    Off,
+    #[serde(rename = "60")]
+    Every60,
+    #[serde(rename = "30")]
+    Every30,
+    #[serde(rename = "15")]
+    Every15,
+    #[serde(rename = "live")]
+    Live,
+}
+
 /// Saved alert settings and history.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -58,8 +80,14 @@ pub struct AlertBook {
     pub enabled: bool,
     pub signals: BTreeMap<SignalKind, bool>,
     pub params: Params,
-    /// The user's background-mode choice (the Android service follows it).
+    /// Live background service running (the Android service follows it).
     pub background: bool,
+    pub background_mode: BackgroundMode,
+    /// Also notify when a stock comes within reach of a trigger.
+    pub notify_get_ready: bool,
+    /// Missing in settings saved before v2, so those load as 0 and migrate.
+    #[serde(default)]
+    pub version: u32,
     pub custom: Vec<CustomAlert>,
     pub history: Vec<FiredAlert>,
     /// "SYMBOL|Kind" -> last time it fired.
@@ -71,13 +99,12 @@ impl Default for AlertBook {
     fn default() -> Self {
         Self {
             enabled: true,
-            signals: SignalKind::DAILY
-                .iter()
-                .chain(SignalKind::INTRADAY.iter())
-                .map(|k| (*k, true))
-                .collect(),
+            signals: default_signals(),
             params: Params::default(),
             background: false,
+            background_mode: BackgroundMode::Every30,
+            notify_get_ready: false,
+            version: BOOK_VERSION,
             custom: Vec::new(),
             history: Vec::new(),
             last_fired: BTreeMap::new(),
@@ -86,7 +113,45 @@ impl Default for AlertBook {
     }
 }
 
+/// Structure entries on; the earlier indicator signals and "downtrend
+/// broken" off.
+fn default_signals() -> BTreeMap<SignalKind, bool> {
+    SignalKind::STRUCTURE
+        .iter()
+        .map(|k| (*k, *k != SignalKind::DowntrendBroken))
+        .chain(
+            SignalKind::DAILY
+                .iter()
+                .chain(SignalKind::INTRADAY.iter())
+                .map(|k| (*k, false)),
+        )
+        .collect()
+}
+
 impl AlertBook {
+    /// Upgrades settings saved by older versions.
+    pub(crate) fn migrate(&mut self) -> bool {
+        if self.version >= BOOK_VERSION {
+            return false;
+        }
+        self.signals = default_signals();
+        self.background_mode = if self.background {
+            BackgroundMode::Live
+        } else {
+            BackgroundMode::Every30
+        };
+        self.version = BOOK_VERSION;
+        true
+    }
+
+    fn enabled_structure(&self) -> Vec<SignalKind> {
+        SignalKind::STRUCTURE
+            .iter()
+            .copied()
+            .filter(|k| self.signal_on(*k))
+            .collect()
+    }
+
     fn signal_on(&self, kind: SignalKind) -> bool {
         self.signals.get(&kind).copied().unwrap_or(true)
     }
@@ -108,6 +173,8 @@ pub(crate) struct Analysis {
     intraday: Option<IntradayLevels>,
     intraday_at: Option<DateTime<Utc>>,
     intraday_triggers: Vec<Trigger>,
+    structure: Option<Structure>,
+    structure_records: Vec<TrackRecord>,
     error: Option<String>,
 }
 
@@ -115,6 +182,8 @@ pub(crate) struct Analysis {
 struct ConfigArgs {
     enabled: Option<bool>,
     background: Option<bool>,
+    background_mode: Option<BackgroundMode>,
+    notify_get_ready: Option<bool>,
     signals: Option<BTreeMap<SignalKind, bool>>,
     params: Option<Params>,
 }
@@ -209,11 +278,12 @@ impl AppService {
                 match self.fetch_year(Some(&sym)).await {
                     Ok(points) => {
                         self.store.lock().unwrap().save_daily(&sym, &points)?;
-                        self.state
-                            .write()
-                            .unwrap()
-                            .synced
-                            .insert(sym.clone(), today);
+                        let synced = {
+                            let mut s = self.state.write().unwrap();
+                            s.synced.insert(sym.clone(), today);
+                            s.synced.clone()
+                        };
+                        self.store.lock().unwrap().save_json(SYNCED_KEY, &synced)?;
                     }
                     Err(e) => a.error = Some(e.to_string()),
                 }
@@ -222,6 +292,8 @@ impl AppService {
             a.history_days = bars.len();
             a.levels = daily_levels(&bars, &params);
             a.records = track_record(&bars, &params);
+            a.structure = structure::analyze(&bars, &params);
+            a.structure_records = structure::track_record(&bars, &params, &SignalKind::STRUCTURE);
             if a.levels.is_none() && a.error.is_none() {
                 a.error = Some(format!("Not enough history yet ({} days)", bars.len()));
             }
@@ -308,17 +380,72 @@ impl AppService {
                 continue;
             }
             let mut triggers: Vec<Trigger> = Vec::new();
+            let live = Live {
+                price,
+                day_low: q.low.map_or(price, to_f64),
+                volume: q.share_volume as f64,
+                session_fraction: fraction,
+            };
             if let Some(a) = s.analysis.get(sym) {
                 if let Some(levels) = &a.levels {
-                    let live = Live {
-                        price,
-                        day_low: q.low.map_or(price, to_f64),
-                        volume: q.share_volume as f64,
-                        session_fraction: fraction,
-                    };
                     triggers.extend(evaluate_daily(levels, &live, &params));
                 }
                 triggers.extend(a.intraday_triggers.iter().cloned());
+                // Market structure: each setup fires once per swing.
+                if let Some(st) = &a.structure {
+                    let view =
+                        structure::evaluate(st, Some(&live), &params, &book.enabled_structure());
+                    let star = if view.weekly_star { " ⭐" } else { "" };
+                    for x in view.setups.iter().filter(|x| x.plan.passes) {
+                        let ready = !x.triggered && x.distance_pct <= params.near_pct;
+                        if !(x.triggered || (ready && book.notify_get_ready)) {
+                            continue;
+                        }
+                        let key = format!(
+                            "{sym}|{:?}|{}|{}",
+                            x.kind,
+                            if x.triggered { "go" } else { "ready" },
+                            st.swing_key
+                        );
+                        if book.last_fired.contains_key(&key) {
+                            continue;
+                        }
+                        book.last_fired.insert(key, now);
+                        let id = book.take_id();
+                        let (kind, message) = if x.triggered {
+                            (
+                                format!("{}{star}", x.kind.label()),
+                                format!(
+                                    "{} · entry {:.2}, stop {:.2}, target {:.2} ({:.1}x)",
+                                    x.note,
+                                    x.plan.entry,
+                                    x.plan.stop,
+                                    x.plan.target,
+                                    x.plan.reward_risk
+                                ),
+                            )
+                        } else {
+                            (
+                                format!("Get ready: {}{star}", x.kind.label()),
+                                format!(
+                                    "{:.1}% below the {} trigger {:.2}",
+                                    x.distance_pct,
+                                    x.kind.label(),
+                                    x.trigger
+                                ),
+                            )
+                        };
+                        fired.push(FiredAlert {
+                            id,
+                            at: now,
+                            symbol: sym.clone(),
+                            kind,
+                            level: x.trigger,
+                            price,
+                            message,
+                        });
+                    }
+                }
             }
             triggers.retain(|t| book.signal_on(t.kind));
             for t in triggers {
@@ -425,20 +552,30 @@ impl AppService {
     /// Appends fired alerts to the outbox file read by the Android service.
     fn write_outbox(&self, fired: &[FiredAlert]) {
         let Some(path) = &self.outbox else { return };
+        // One notification per check: a single alert in full, several summarised.
+        let line = match fired {
+            [] => return,
+            [a] => json!({
+                "id": a.id,
+                "title": format!("{} · {}", short(&a.symbol), a.kind),
+                "body": a.message,
+            }),
+            many => json!({
+                "id": many.iter().map(|a| a.id).max(),
+                "title": format!("🔔 {} stocks to look at", many.len()),
+                "body": many
+                    .iter()
+                    .map(|a| format!("{} {}", short(&a.symbol), a.kind))
+                    .collect::<Vec<_>>()
+                    .join(" · "),
+            }),
+        };
         if let Ok(mut f) = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(path)
         {
-            for a in fired {
-                let line = json!({
-                    "id": a.id,
-                    "title": format!("{} · {}", a.symbol, a.kind),
-                    "body": a.message,
-                    "symbol": a.symbol,
-                });
-                let _ = writeln!(f, "{line}");
-            }
+            let _ = writeln!(f, "{line}");
         }
     }
 
@@ -456,6 +593,12 @@ impl AppService {
                     }
                     if let Some(v) = a.background {
                         b.background = v;
+                    }
+                    if let Some(v) = a.background_mode {
+                        b.background_mode = v;
+                    }
+                    if let Some(v) = a.notify_get_ready {
+                        b.notify_get_ready = v;
                     }
                     if let Some(v) = a.signals {
                         b.signals.extend(v);
@@ -518,6 +661,7 @@ impl AppService {
                     .collect();
                 Ok(json!({ "latest_id": latest, "alerts": new }))
             })(),
+            "favourite_markers" => self.favourite_markers(),
             "outbox_path" => Ok(json!(self.outbox.as_ref().map(|p| p.display().to_string()))),
             _ => return None,
         };
@@ -540,6 +684,12 @@ impl AppService {
                     "change_pct": q.map(|q| q.change_pct),
                     "levels": a.and_then(|a| a.levels.as_ref()),
                     "records": a.map(|a| &a.records),
+                    "structure": a.and_then(|a| a.structure.as_ref()),
+                    "structure_records": a.map(|a| &a.structure_records),
+                    "structure_view": a.and_then(|a| a.structure.as_ref()).map(|st| {
+                        let live = q.map(live_of);
+                        structure::evaluate(st, live.as_ref(), &b.params, &b.enabled_structure())
+                    }),
                     "history_days": a.map(|a| a.history_days),
                     "intraday": a.and_then(|a| a.intraday.as_ref()),
                     "pending": a.is_none(),
@@ -557,6 +707,8 @@ impl AppService {
         Ok(json!({
             "enabled": b.enabled,
             "background": b.background,
+            "background_mode": b.background_mode,
+            "notify_get_ready": b.notify_get_ready,
             "signals": b.signals,
             "labels": labels,
             "params": b.params,
@@ -564,6 +716,118 @@ impl AppService {
             "custom": b.custom,
             "history": history,
         }))
+    }
+}
+
+/// `ABAN.N0000` -> `ABAN` for notifications.
+fn short(symbol: &str) -> &str {
+    symbol.strip_suffix(".N0000").unwrap_or(symbol)
+}
+
+/// Today's figures from a quote, for evaluating levels outside the refresh.
+fn live_of(q: &cse_core::Quote) -> Live {
+    let price = to_f64(q.last);
+    Live {
+        price,
+        day_low: q.low.map_or(price, to_f64),
+        volume: q.share_volume as f64,
+        session_fraction: 1.0,
+    }
+}
+
+fn status_name(s: Status) -> &'static str {
+    match s {
+        Status::LookNow => "look_now",
+        Status::GetReady => "get_ready",
+        Status::Uptrend => "uptrend",
+        Status::Range => "range",
+        Status::Downtrend => "downtrend",
+        Status::Thin => "thin",
+    }
+}
+
+impl AppService {
+    /// Marker per favourite for the Watch list: what to look at.
+    fn favourite_markers(&self) -> Result<Value> {
+        let favourites = self.favourites()?;
+        let today = lk_day(self.now());
+        let s = self.state.read().unwrap();
+        let b = &s.alerts;
+        let enabled = b.enabled_structure();
+        let structure_labels: Vec<&str> = SignalKind::STRUCTURE.iter().map(|k| k.label()).collect();
+        let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+        let mut markers = serde_json::Map::new();
+        for sym in &favourites {
+            let a = s.analysis.get(sym);
+            let q = s.market.quotes.get(sym);
+            let marker = match a.and_then(|a| a.structure.as_ref()) {
+                None => json!({ "status": if a.is_none() { "pending" } else { "no_data" } }),
+                Some(st) => {
+                    let live = q.map(live_of);
+                    let view = structure::evaluate(st, live.as_ref(), &b.params, &enabled);
+                    // A setup that fired today keeps the stock in "look now".
+                    let fired_today = b.history.iter().rev().find(|f| {
+                        f.symbol == *sym
+                            && lk_day(f.at) == today
+                            && structure_labels.iter().any(|l| f.kind.starts_with(l))
+                    });
+                    let status = if fired_today.is_some() && st.liquid {
+                        Status::LookNow
+                    } else {
+                        view.status
+                    };
+                    let best = view
+                        .setups
+                        .iter()
+                        .filter(|x| x.plan.passes)
+                        .min_by(|x, y| x.distance_pct.total_cmp(&y.distance_pct));
+                    let (label, detail) = match (status, best, fired_today) {
+                        (Status::LookNow, _, Some(f)) => (f.kind.clone(), f.message.clone()),
+                        (Status::LookNow | Status::GetReady, Some(x), _) => (
+                            x.kind.label().to_string(),
+                            if x.triggered {
+                                format!(
+                                    "entry {:.2} · stop {:.2} · {:.1}x",
+                                    x.plan.entry, x.plan.stop, x.plan.reward_risk
+                                )
+                            } else {
+                                format!(
+                                    "{:.1}% to {:.2} · {:.1}x",
+                                    x.distance_pct, x.trigger, x.plan.reward_risk
+                                )
+                            },
+                        ),
+                        _ => (String::new(), String::new()),
+                    };
+                    json!({
+                        "status": status_name(status),
+                        "trend": st.trend,
+                        "star": view.weekly_star,
+                        "label": label,
+                        "detail": detail,
+                    })
+                }
+            };
+            let st = marker["status"].as_str().unwrap_or("pending").to_string();
+            *counts.entry(st).or_default() += 1;
+            markers.insert(sym.clone(), marker);
+        }
+        Ok(json!({
+            "markers": markers,
+            "counts": counts,
+            "updated_at": s.market.updated_at,
+            "background_mode": b.background_mode,
+        }))
+    }
+
+    /// One complete check for scheduled background runs: refresh prices,
+    /// update every favourite and fire alerts. Returns the number of new
+    /// alerts.
+    pub async fn run_check(&self) -> Result<usize> {
+        let before = self.state.read().unwrap().alerts.next_id;
+        self.refresh().await?;
+        let after = self.state.read().unwrap().alerts.next_id;
+        Ok((after - before) as usize)
     }
 }
 

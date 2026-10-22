@@ -404,6 +404,12 @@ async fn alerts_fire_for_favourites_and_custom_levels() {
         json!({"id": wl["id"], "symbol": "JKH.N0000"}),
     )
     .await;
+    // The indicator signals are off by default since market structure.
+    h.call(
+        "update_alert_config",
+        json!({"signals": {"Breakout": true, "OpeningRange": true}}),
+    )
+    .await;
     h.call(
         "add_custom_alert",
         json!({"symbol": "COMB.N0000", "above": true, "price": "150"}),
@@ -421,10 +427,15 @@ async fn alerts_fire_for_favourites_and_custom_levels() {
     assert!(kinds.contains(&("COMB.N0000", "Custom")), "{kinds:?}");
     let latest = pending["latest_id"].as_u64().unwrap();
 
-    // The outbox holds one line per alert for the Android service.
+    // One combined notification per check for the Android service.
     let outbox = std::fs::read_to_string(&h.outbox).unwrap();
-    assert_eq!(outbox.lines().count(), alerts.len());
-    assert!(outbox.contains("JKH.N0000 · Breakout"));
+    assert_eq!(outbox.lines().count(), 1);
+    let line: Value = serde_json::from_str(outbox.trim()).unwrap();
+    assert_eq!(
+        line["title"],
+        format!("🔔 {} stocks to look at", alerts.len())
+    );
+    assert!(line["body"].as_str().unwrap().contains("JKH Breakout"));
 
     // A minute later nothing repeats: cooldown, and custom alerts are one-shot.
     h.set_time(lk_on(16, 11, 1));
@@ -564,4 +575,179 @@ async fn import_watch_list_from_codes() {
         .await
         .unwrap_err();
     assert!(err.to_string().contains("none of the codes"));
+}
+
+/// A clean uptrend for JKH: higher highs (110, 120, 135), higher lows
+/// (90, 105), now pulled back to 122 and bouncing.
+fn uptrend_chart() -> String {
+    let legs: [f64; 7] = [100.0, 110.0, 90.0, 120.0, 105.0, 135.0, 122.0];
+    let mut closes = vec![legs[0]];
+    for w in legs.windows(2) {
+        let steps = ((w[1] / w[0]).ln().abs() / 0.01).ceil() as usize;
+        for i in 1..=steps {
+            closes.push(w[0] * (w[1] / w[0]).powf(i as f64 / steps as f64));
+        }
+    }
+    // The last bar is Thursday 15 Oct, the day before the test's session.
+    let end = lk_on(15, 0, 0).timestamp_millis();
+    let n = closes.len() as i64;
+    let bars: Vec<Value> = closes
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            let c = (c * 100.0_f64).round() / 100.0;
+            json!({"h": c * 1.004, "l": c * 0.996, "p": c, "q": 1_000_000,
+                   "t": end - (n - 1 - i as i64) * 86_400_000, "id": 297})
+        })
+        .collect();
+    json!({ "chartData": bars, "id": 297 }).to_string()
+}
+
+fn price_jkh(price: f64, low: f64) -> String {
+    let mut v: Value = serde_json::from_str(&fixture("tradeSummary")).unwrap();
+    for q in v["reqTradeSummery"].as_array_mut().unwrap() {
+        if q["symbol"] == "JKH.N0000" {
+            q["price"] = json!(price);
+            q["high"] = json!(price);
+            q["low"] = json!(low);
+        }
+    }
+    v.to_string()
+}
+
+#[tokio::test]
+async fn higher_low_entry_fires_once_and_marks_the_favourite() {
+    let mut r = routes("Market Open");
+    chart_routes(&mut r);
+    r.insert("companyChartDataByStock", uptrend_chart());
+    r.insert("tradeSummary", price_jkh(126.0, 124.0));
+    let h = Harness::with_routes(r, lk_on(16, 11, 0)).await;
+    let wl = h
+        .call("create_watch_list", json!({"name": "Favourites"}))
+        .await;
+    for sym in ["JKH.N0000"] {
+        h.call("add_to_watch_list", json!({"id": wl["id"], "symbol": sym}))
+            .await;
+    }
+
+    // Before any check the markers are pending.
+    let m = h.call("favourite_markers", Value::Null).await;
+    assert_eq!(m["markers"]["JKH.N0000"]["status"], "pending");
+
+    let fired = h.svc.run_check().await.unwrap();
+    let pending = h.call("alerts_pending", json!({"after_id": 0})).await;
+    let alerts = pending["alerts"].as_array().unwrap();
+    assert_eq!(fired, alerts.len());
+    let entry = alerts
+        .iter()
+        .find(|a| a["symbol"] == "JKH.N0000")
+        .unwrap_or_else(|| panic!("{alerts:?}"));
+    assert!(entry["kind"]
+        .as_str()
+        .unwrap()
+        .starts_with("Higher low entry"));
+    let msg = entry["message"].as_str().unwrap();
+    assert!(
+        msg.contains("entry 124.55") && msg.contains("target 135.54"),
+        "{msg}"
+    );
+
+    let outbox = std::fs::read_to_string(&h.outbox).unwrap();
+    let line: Value = serde_json::from_str(outbox.trim()).unwrap();
+    assert!(
+        line["title"]
+            .as_str()
+            .unwrap()
+            .starts_with("JKH · Higher low entry"),
+        "{line} {alerts:?}"
+    );
+
+    let m = h.call("favourite_markers", Value::Null).await;
+    let jkh = &m["markers"]["JKH.N0000"];
+    assert_eq!(jkh["status"], "look_now", "{m}");
+    assert_eq!(jkh["trend"], "Up");
+    assert!(jkh["label"]
+        .as_str()
+        .unwrap()
+        .starts_with("Higher low entry"));
+    assert_eq!(m["counts"]["look_now"], 1);
+    assert_eq!(m["background_mode"], "30");
+
+    // The stock screen gets the structure and the plan.
+    let view = h.call("alerts", Value::Null).await;
+    let fav = view["favourites"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["symbol"] == "JKH.N0000")
+        .unwrap();
+    assert_eq!(fav["structure"]["trend"], "Up");
+    assert_eq!(fav["structure_view"]["setups"][0]["triggered"], true);
+
+    // Later checks on the same swing stay quiet.
+    h.set_time(lk_on(16, 11, 30));
+    assert_eq!(h.svc.run_check().await.unwrap(), 0);
+    h.set_time(lk_on(16, 14, 0));
+    assert_eq!(h.svc.run_check().await.unwrap(), 0);
+}
+
+#[tokio::test]
+async fn get_ready_is_a_marker_unless_asked_to_notify() {
+    let mut r = routes("Market Open");
+    chart_routes(&mut r);
+    r.insert("companyChartDataByStock", uptrend_chart());
+    // 123.5 is within 2% of the 124.55 trigger.
+    r.insert("tradeSummary", price_jkh(123.5, 122.5));
+    let h = Harness::with_routes(r, lk_on(16, 11, 0)).await;
+    let wl = h
+        .call("create_watch_list", json!({"name": "Favourites"}))
+        .await;
+    h.call(
+        "add_to_watch_list",
+        json!({"id": wl["id"], "symbol": "JKH.N0000"}),
+    )
+    .await;
+    assert_eq!(h.svc.run_check().await.unwrap(), 0);
+    let m = h.call("favourite_markers", Value::Null).await;
+    assert_eq!(m["markers"]["JKH.N0000"]["status"], "get_ready", "{m}");
+
+    h.call(
+        "update_alert_config",
+        json!({"notify_get_ready": true, "background_mode": "15"}),
+    )
+    .await;
+    h.set_time(lk_on(16, 11, 15));
+    assert_eq!(h.svc.run_check().await.unwrap(), 1);
+    let view = h.call("alerts", Value::Null).await;
+    assert_eq!(view["background_mode"], "15");
+    assert!(view["history"][0]["kind"]
+        .as_str()
+        .unwrap()
+        .starts_with("Get ready"));
+}
+
+#[tokio::test]
+async fn old_alert_settings_migrate_to_structure() {
+    let base = stub(routes("Market Closed")).await;
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .save_json(
+            "alerts",
+            &json!({"enabled": true, "signals": {"Breakout": true, "VolumeSpike": true},
+                    "background": true}),
+        )
+        .unwrap();
+    let svc = AppService::with(
+        store,
+        CseClient::new(base).with_retries(0),
+        Arc::new(|| lk_on(16, 15, 0)),
+    )
+    .unwrap();
+    let view = svc.dispatch("alerts", Value::Null).await.unwrap();
+    assert_eq!(view["signals"]["Breakout"], false);
+    assert_eq!(view["signals"]["VolumeSpike"], false);
+    assert_eq!(view["signals"]["HigherLowEntry"], true);
+    assert_eq!(view["signals"]["UptrendConfirmed"], true);
+    assert_eq!(view["signals"]["DowntrendBroken"], false);
+    assert_eq!(view["background_mode"], "live");
 }

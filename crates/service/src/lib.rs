@@ -99,13 +99,19 @@ impl AppService {
         self
     }
 
-    pub fn with(store: Store, client: CseClient, clock: Clock) -> Result<Self> {
+    pub fn with(mut store: Store, client: CseClient, clock: Clock) -> Result<Self> {
         let now = clock();
         let account = store
             .load_json(ACCOUNT_KEY)?
             .unwrap_or_else(|| Account::new(DEFAULT_STARTING_CASH, Settings::default(), now));
         let real = store.load_json(REAL_KEY)?.unwrap_or_default();
-        let alert_book = store.load_json(alerts::ALERTS_KEY)?.unwrap_or_default();
+        let mut alert_book: alerts::AlertBook =
+            store.load_json(alerts::ALERTS_KEY)?.unwrap_or_default();
+        if alert_book.migrate() {
+            store.save_json(alerts::ALERTS_KEY, &alert_book)?;
+        }
+        let synced: HashMap<String, chrono::NaiveDate> =
+            store.load_json(alerts::SYNCED_KEY)?.unwrap_or_default();
         Ok(Self {
             client,
             store: Mutex::new(store),
@@ -114,7 +120,7 @@ impl AppService {
                 real,
                 market: MarketData::default(),
                 last_snapshot: None,
-                synced: HashMap::new(),
+                synced,
                 last_daily_save: None,
                 alerts: alert_book,
                 analysis: HashMap::new(),
