@@ -344,45 +344,151 @@ async function loadWatchLists() { watchLists = await call("watch_lists"); }
 // ---------- charts ----------
 const RANGES = ["1D", "1W", "1M", "3M", "1Y", "All"];
 const chartCache = new Map(); // "key|range" -> { at, data }
-// Swing points (HH/HL/LH/LL) drawn over the chart as positioned dots.
-function chartSvg(points, swings = []) {
-  const w = 600, h = 170, pad = 4;
+// ---- chart: price line, axes, swing dots and a touch crosshair ----
+const LK_MS = 5.5 * 3600e3; // Sri Lanka is UTC+05:30 all year
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const lkDate = (ms) => new Date(ms + LK_MS); // read with getUTC*
+// Round grid steps (1, 2 or 5 x 10^n) giving about `count` lines.
+function niceStep(span, count) {
+  const raw = span / count, mag = Math.pow(10, Math.floor(Math.log10(raw)));
+  return [1, 2, 5, 10].map((m) => m * mag).find((x) => x >= raw);
+}
+// Scales and axis ticks shared by the drawing and the crosshair.
+function chartGeom(points, range) {
   const ys = points.map((p) => num(p.price));
   const xs = points.map((p) => new Date(p.at).getTime());
-  let minY = Math.min(...ys), maxY = Math.max(...ys);
-  // Keep at least a 3% vertical span so one-tick moves don't fill the chart.
-  const mid = (minY + maxY) / 2, minSpan = Math.abs(mid) * 0.03;
-  if (maxY - minY < minSpan) { minY = mid - minSpan / 2; maxY = mid + minSpan / 2; }
+  let lo = Math.min(...ys), hi = Math.max(...ys);
+  // Keep at least a 3% span so one-tick moves don't fill the chart.
+  const mid = (lo + hi) / 2, minSpan = Math.abs(mid) * 0.03 || 1;
+  if (hi - lo < minSpan) { lo = mid - minSpan / 2; hi = mid + minSpan / 2; }
+  const step = niceStep(hi - lo, 5);
+  const minY = Math.floor(lo / step) * step, maxY = Math.ceil(hi / step) * step;
+  const yTicks = [];
+  for (let v = minY; v <= maxY + step / 2; v += step) yTicks.push(+v.toFixed(10));
+  const dp = step >= 1 && mid >= 1000 ? 0 : 2;
   const minX = xs[0], maxX = xs[xs.length - 1];
-  const sx = (x) => pad + ((x - minX) / (maxX - minX || 1)) * (w - 2 * pad);
-  const sy = (y) => h - pad - ((y - minY) / (maxY - minY || 1)) * (h - 2 * pad);
-  const line = points.map((p, i) => `${i ? "L" : "M"}${sx(xs[i]).toFixed(1)},${sy(ys[i]).toFixed(1)}`).join("");
-  const area = `${line}L${sx(maxX).toFixed(1)},${h}L${sx(minX).toFixed(1)},${h}Z`;
-  const up = ys[ys.length - 1] >= ys[0];
+  const fx = (x) => (x - minX) / (maxX - minX || 1); // 0..1 across
+  const fy = (y) => 1 - (y - minY) / (maxY - minY || 1); // 0..1 down
+  // Drop date labels that would crowd the previous one (e.g. after a weekend).
+  let lastF = -1;
+  const ticks = xTicks(xs, range).filter((x) => {
+    const f = fx(x.t);
+    if (lastF >= 0 && f - lastF < 0.17) return false;
+    lastF = f;
+    return true;
+  });
+  return { ys, xs, minX, maxX, minY, maxY, yTicks, dp, fx, fy, xTicks: ticks };
+}
+// Date labels: hours for 1D, evenly spaced days for 1W/1M, month starts
+// (thinned to at most five) for longer ranges.
+function xTicks(xs, range) {
+  const minX = xs[0], maxX = xs[xs.length - 1], out = [];
+  if (range === "1D") {
+    const hour = 3600e3;
+    for (let t = Math.ceil((minX + LK_MS) / hour) * hour - LK_MS; t <= maxX; t += hour) {
+      out.push({ t, label: String(lkDate(t).getUTCHours()).padStart(2, "0") + ":00" });
+    }
+    return out;
+  }
+  if (range === "1W" || range === "1M") {
+    const k = Math.min(4, xs.length);
+    for (let i = 0; i < k; i++) {
+      const t = xs[Math.round((i * (xs.length - 1)) / Math.max(k - 1, 1))];
+      const d = lkDate(t);
+      out.push({ t, label: `${d.getUTCDate()} ${MONTHS[d.getUTCMonth()]}` });
+    }
+    return out.filter((x, i, a) => i === 0 || x.t !== a[i - 1].t);
+  }
+  const starts = [];
+  let prev = null;
+  for (const t of xs) {
+    const d = lkDate(t), m = d.getUTCFullYear() * 12 + d.getUTCMonth();
+    if (prev !== null && m !== prev) starts.push({ t, d });
+    prev = m;
+  }
+  const every = Math.ceil(starts.length / 5) || 1;
+  for (let i = starts.length - 1; i >= 0; i -= every) {
+    const { t, d } = starts[i];
+    const year = String(d.getUTCFullYear()).slice(2);
+    const label = range === "All" || d.getUTCMonth() === 0 ? `${MONTHS[d.getUTCMonth()]} ${year}` : MONTHS[d.getUTCMonth()];
+    out.unshift({ t, label });
+  }
+  return out;
+}
+function pointLabel(ms, range) {
+  const d = lkDate(ms);
+  const date = `${d.getUTCDate()} ${MONTHS[d.getUTCMonth()]} ${String(d.getUTCFullYear()).slice(2)}`;
+  return range === "1D"
+    ? `${String(d.getUTCHours()).padStart(2, "0")}:${String(d.getUTCMinutes()).padStart(2, "0")}`
+    : date;
+}
+function chartSvg(points, range, swings = []) {
+  const g = chartGeom(points, range);
+  const w = 600, h = 170;
+  const X = (x) => (g.fx(x) * w).toFixed(1), Y = (y) => (g.fy(y) * h).toFixed(1);
+  const line = points.map((p, i) => `${i ? "L" : "M"}${X(g.xs[i])},${Y(g.ys[i])}`).join("");
+  const area = `${line}L${w},${h}L0,${h}Z`;
+  const up = g.ys[g.ys.length - 1] >= g.ys[0];
   const color = up ? "var(--up)" : "var(--down)";
   const gid = "g" + Math.random().toString(36).slice(2, 8);
+  const pctX = (t) => (g.fx(t) * 100).toFixed(2), pctY = (v) => (g.fy(v) * 100).toFixed(2);
+  const last = g.ys[g.ys.length - 1];
+  const grid = g.yTicks.map((v) => `<line x1="0" x2="${w}" y1="${Y(v)}" y2="${Y(v)}" class="grid"/>`).join("")
+    + g.xTicks.map((x) => `<line y1="0" y2="${h}" x1="${X(x.t)}" x2="${X(x.t)}" class="grid v"/>`).join("");
+  // Price labels, skipping any that would sit on the last-price tag.
+  const yLabels = g.yTicks
+    .filter((v) => Math.abs(g.fy(v) - g.fy(last)) > 0.09)
+    .map((v) => `<span class="ylab num" style="top:${pctY(v)}%">${fmt(v, g.dp)}</span>`).join("");
+  const xLabels = g.xTicks.map((x) => {
+    const p = g.fx(x.t), align = p < 0.08 ? "start" : p > 0.92 ? "end" : "mid";
+    return `<span class="xlab ${align}" style="left:${pctX(x.t)}%">${x.label}</span>`;
+  }).join("");
   const dots = swings
-    .filter((sw) => sw.time * 1000 >= minX && sw.time * 1000 <= maxX)
+    .filter((sw) => sw.time * 1000 >= g.minX && sw.time * 1000 <= g.maxX)
     .map((sw) => {
-      const y = Math.min(Math.max(sy(sw.price), 0), h);
+      const y = Math.min(Math.max(g.fy(sw.price), 0), 1) * 100;
       const lbl = sw.label || (sw.kind === "High" ? "H" : "L");
       const cls = sw.label === "HH" || sw.label === "HL" ? "up" : sw.label ? "down" : "flat";
-      return `<span class="swing ${cls} ${sw.kind === "High" ? "hi" : "lo"}" style="left:${(sx(sw.time * 1000) / w * 100).toFixed(2)}%;top:${(y / h * 100).toFixed(2)}%"><i></i>${lbl}</span>`;
+      return `<span class="swing ${cls} ${sw.kind === "High" ? "hi" : "lo"}" style="left:${pctX(sw.time * 1000)}%;top:${y.toFixed(2)}%"><i></i>${lbl}</span>`;
     }).join("");
-  return `<div class="chart-wrap"><svg class="chart" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" role="img" aria-label="Price chart">
-    <defs><linearGradient id="${gid}" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="${up ? "#22c55e" : "#ef4444"}" stop-opacity=".28"/>
-      <stop offset="1" stop-color="${up ? "#22c55e" : "#ef4444"}" stop-opacity="0"/></linearGradient></defs>
-    <path d="${area}" fill="url(#${gid})" stroke="none"/>
-    <path class="line" d="${line}" stroke="${color}" vector-effect="non-scaling-stroke"/></svg>${dots}</div>`;
+  return `<div class="chart-wrap"><div class="plot" data-range="${range}">
+    <svg class="chart" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" role="img" aria-label="Price chart">
+      <defs><linearGradient id="${gid}" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0" stop-color="${up ? "#22c55e" : "#ef4444"}" stop-opacity=".28"/>
+        <stop offset="1" stop-color="${up ? "#22c55e" : "#ef4444"}" stop-opacity="0"/></linearGradient></defs>
+      ${grid}
+      <path d="${area}" fill="url(#${gid})" stroke="none"/>
+      <path class="line" d="${line}" stroke="${color}" vector-effect="non-scaling-stroke"/></svg>
+    ${dots}${yLabels}
+    <span class="ytag num ${up ? "up" : "down"}" style="top:${pctY(last)}%">${fmt(last, g.dp)}</span>
+    ${xLabels}
+    <div class="xhair hidden"><i class="xv"></i><i class="xh"></i><b class="xdot"></b><span class="xtip"></span></div>
+  </div></div>`;
 }
-function chartLabel(iso, range) {
-  const d = new Date(iso);
-  const opts = range === "1D"
-    ? { hour: "2-digit", minute: "2-digit" }
-    : range === "1W" || range === "1M" ? { day: "2-digit", month: "short" }
-    : { month: "short", year: "numeric" };
-  return d.toLocaleString("en-GB", { timeZone: "Asia/Colombo", ...opts });
+// Press and drag on the chart to read the date and price of any point.
+function bindCrosshair(area, points, range) {
+  const plot = $(".plot", area);
+  if (!plot) return;
+  const g = chartGeom(points, range);
+  const box = $(".xhair", plot), tip = $(".xtip", plot);
+  const show = (e) => {
+    const r = plot.getBoundingClientRect();
+    const f = Math.min(Math.max((e.clientX - r.left) / r.width, 0), 1);
+    const t = g.minX + f * (g.maxX - g.minX);
+    let i = 0;
+    for (let k = 1; k < g.xs.length; k++) if (Math.abs(g.xs[k] - t) < Math.abs(g.xs[i] - t)) i = k;
+    const x = g.fx(g.xs[i]) * 100, y = g.fy(g.ys[i]) * 100;
+    const chg = g.ys[0] ? (g.ys[i] / g.ys[0] - 1) * 100 : 0;
+    box.style.setProperty("--x", x + "%");
+    box.style.setProperty("--y", y + "%");
+    tip.innerHTML = `${pointLabel(g.xs[i], range)} · <b>${fmt(g.ys[i])}</b> <span class="${chg >= 0 ? "up" : "down"}">${chg >= 0 ? "+" : ""}${fmt(chg, 2)}%</span>`;
+    tip.classList.toggle("right", x > 55);
+    box.classList.remove("hidden");
+  };
+  const hide = () => box.classList.add("hidden");
+  plot.onpointerdown = (e) => { plot.setPointerCapture?.(e.pointerId); show(e); };
+  plot.onpointermove = (e) => { if (e.pointerType === "mouse" || !box.classList.contains("hidden")) show(e); };
+  plot.onpointerup = plot.onpointercancel = plot.onpointerleave = hide;
 }
 function chartBody(data, swings) {
   const pts = data.points || [];
@@ -392,13 +498,16 @@ function chartBody(data, swings) {
   if (pts.length < 2) {
     return `<div class="empty small">${data.range === "1D" ? "No trades yet today." : "No price history yet."}</div>${note}${saved}`;
   }
-  const ys = pts.map((p) => num(p.price));
-  return `${chartSvg(pts, data.range === "1D" ? [] : swings)}
-    <div class="legend small muted"><span>${chartLabel(pts[0].at, data.range)}</span>
+  return `${chartSvg(pts, data.range, data.range === "1D" ? [] : swings)}
+    <div class="legend small muted"><span>${data.range === "1D" ? "Today" : data.range}</span>
       <span class="num ${dir(data.change)}">${signed(data.change)} (${pct(data.change_pct)})</span>
-      <span>${chartLabel(pts[pts.length - 1].at, data.range)}</span></div>
-    <div class="legend small muted"><span>Low ${fmt(Math.min(...ys))}</span><span>${fmtInt(pts.length)} points</span><span>High ${fmt(Math.max(...ys))}</span></div>
+      <span>Touch the chart for values</span></div>
     ${note}${data.range === "All" ? saved : ""}`;
+}
+// Draws `data` into the chart area and turns on the crosshair.
+function drawChart(area, data, swings) {
+  area.innerHTML = chartBody(data, swings);
+  if ((data.points || []).length >= 2) bindCrosshair(area, data.points, data.range);
 }
 // Renders a chart with range buttons into `el`. symbol = null for ASPI.
 async function mountChart(el, symbol, swings = []) {
@@ -415,12 +524,12 @@ async function mountChart(el, symbol, swings = []) {
     const cacheKey = key + "|" + range;
     const ttl = range === "1D" ? 60e3 : 10 * 60e3;
     const hit = chartCache.get(cacheKey);
-    if (hit && Date.now() - hit.at < ttl) { area.innerHTML = chartBody(hit.data, swings); return; }
+    if (hit && Date.now() - hit.at < ttl) { drawChart(area, hit.data, swings); return; }
     area.innerHTML = `<div class="empty small">Loading chart…</div>`;
     try {
       const data = await call("chart", symbol ? { symbol, range } : { range });
       chartCache.set(cacheKey, { at: Date.now(), data });
-      if (el.isConnected) area.innerHTML = chartBody(data, swings);
+      if (el.isConnected) drawChart(area, data, swings);
     } catch (e) {
       area.innerHTML = `<div class="empty small">${esc(e.message || e)}</div>`;
     }
