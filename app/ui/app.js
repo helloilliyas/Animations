@@ -186,6 +186,7 @@ const MARK = {
   broken: ["⚠", "Uptrend broken", "mk-broken"],
   range: ["↔", "Range", "mk-range"],
   downtrend: ["↘", "Downtrend", "mk-down"],
+  breaking_down: ["⚠", "Breaking down", "mk-falling"],
   thin: ["·", "Thinly traded", "mk-thin"],
   pending: ["…", "Checking", "mk-thin"],
   no_data: ["–", "No history yet", "mk-thin"],
@@ -196,7 +197,7 @@ const markOf = (sym) => markers.markers[sym];
 function markBadge(m) {
   if (!m) return "";
   let [icon, text, cls] = MARK[m.status] || MARK.pending;
-  const full = m.status === "look_now" || m.status === "get_ready" || m.status === "broken";
+  const full = ["look_now", "get_ready", "broken", "breaking_down"].includes(m.status);
   // Thin stocks get no alerts but still show their trend.
   if (m.status === "thin") icon = ({ Up: "↗", Down: "↘", Range: "↔" }[m.trend] || "") + " thin";
   return `<span class="mk ${cls}" title="${text}">${icon}${full ? " " + text : ""}${m.star ? " ⭐" : ""}</span>`;
@@ -267,7 +268,7 @@ async function renderWatch() {
     <div class="list">${list.length ? list.slice(0, 400).map((q) => {
       const m = markOf(q.symbol);
       // The badge already names a broken trend; the line adds the level.
-      const why = m && m.label ? `<div class="sub ${MARK[m.status][2]}">${m.status === "broken" ? esc(m.detail) : esc(m.label) + (m.detail ? " · " + esc(m.detail) : "")}</div>` : "";
+      const why = m && m.label ? `<div class="sub ${MARK[m.status][2]}">${m.status === "broken" || m.status === "breaking_down" ? esc(m.detail) : esc(m.label) + (m.detail ? " · " + esc(m.detail) : "")}</div>` : "";
       return `
       <div class="row" data-symbol="${esc(q.symbol)}">
         <div><div class="sym">${esc(q.symbol)} ${markBadge(m)}</div><div class="sub">${esc(q.name)}</div>${why}</div>
@@ -1001,7 +1002,7 @@ function distance(price, level) {
   return `<span class="muted small">(${d >= 0 ? "+" : ""}${fmt(d, 1)}% away)</span>`;
 }
 const TREND = { Up: ["↗ Uptrend", "up"], Down: ["↘ Downtrend", "down"], Range: ["↔ Range", "flat"] };
-const PERIOD = { Up: ["↗ Uptrend", "up"], Down: ["↘ Downtrend", "down"], Range: ["↔ Range", "flat"], Broken: ["⚠ Uptrend broken", "mk-broken"] };
+const PERIOD = { Up: ["↗ Uptrend", "up"], Down: ["↘ Downtrend", "down"], Range: ["↔ Range", "flat"], Broken: ["⚠ Uptrend broken", "mk-broken"], BreakingDown: ["⚠ Breaking down", "mk-falling"] };
 const fmtDay = (d) => new Date(d + "T00:00:00").toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "2-digit" });
 const sgn = (x, dp = 1) => (x == null ? "—" : (x > 0 ? "+" : "") + fmt(x, dp) + "%");
 // One alert with how it turned out.
@@ -1042,7 +1043,8 @@ async function loadHistory(el, symbol) {
 function swingChain(st) {
   return st.swings.slice(-6).map((w) => {
     const cls = w.label === "HH" || w.label === "HL" ? "up" : w.label ? "down" : "muted";
-    return `<span class="${cls}">${w.label || (w.kind === "High" ? "H" : "L")}&nbsp;${fmt(w.price)}</span>`;
+    const d = lkDate(w.time * 1000);
+    return `<span class="${cls}">${w.label || (w.kind === "High" ? "H" : "L")}&nbsp;${fmt(w.price)}&nbsp;<span class="sw-date">(${d.getUTCDate()}&nbsp;${MONTHS[d.getUTCMonth()]})</span></span>`;
   }).join(" → ");
 }
 function setupBlock(x, labels) {
@@ -1063,7 +1065,9 @@ function structureCard(f, v) {
   if (!st) {
     return `<div class="card struct"><b>Market structure</b><div class="small muted">${f.pending ? "Checking… (needs the next data refresh)" : esc(f.error || "Not enough history yet (needs 30 trading days)")}</div></div>`;
   }
-  const [tl, tc] = sv && sv.breaking === "UptrendBroken" ? ["⚠ Uptrend broken", "mk-broken"] : TREND[st.trend];
+  const [tl, tc] = sv && sv.breaking === "UptrendBroken" ? ["⚠ Uptrend broken", "mk-broken"]
+    : sv && sv.breaking === "BreakingDown" ? [`⚠ ${st.trend === "Range" ? "Range" : "Downtrend"}, breaking down`, "mk-falling"]
+    : TREND[st.trend];
   const m = markOf(f.symbol);
   const recs = (f.structure_records || []).filter((r) => r.fired);
   return `<div class="card struct">
@@ -1071,7 +1075,7 @@ function structureCard(f, v) {
     <div class="small"><span class="${tc}">${tl}</span> · weekly ${st.weekly_trend ? `<span class="${TREND[st.weekly_trend][1]}">${st.weekly_trend}</span>` : "—"}
       · swings of ${fmt(st.threshold_pct, 1)}%+${st.liquid ? "" : ` · <span class="muted">thinly traded (Rs. ${fmtVol(st.avg_turnover)}/day) — no alerts</span>`}</div>
     <div class="small swings">${swingChain(st)}</div>
-    ${sv && sv.break_note ? `<div class="banner ${sv.breaking === "UptrendBroken" ? "warn" : ""}">${sv.breaking === "UptrendBroken" ? "⚠ " : "↗ "}${esc(sv.break_note)}</div>` : ""}
+    ${sv && sv.break_note ? `<div class="banner ${sv.breaking === "DowntrendBreaking" ? "" : sv.breaking === "BreakingDown" ? "falling" : "warn"}">${sv.breaking === "DowntrendBreaking" ? "↗ " : "⚠ "}${esc(sv.break_note)}</div>` : ""}
     ${sv && sv.setups.length ? sv.setups.map((x) => setupBlock(x, labels)).join("")
       : sv && sv.breaking ? "" : `<div class="small muted" style="margin-top:6px">${st.trend === "Up"
         ? "Uptrend, no entry yet: waiting for a pullback that holds above the last low, or a break of the last high."
@@ -1082,7 +1086,7 @@ function structureCard(f, v) {
       : `<span class="muted">No structure signals on this stock in the past year.</span>`}</div>
   </div>`;
 }
-const statusKey = (s) => ({ LookNow: "look_now", GetReady: "get_ready", Uptrend: "uptrend", Broken: "broken", Range: "range", Downtrend: "downtrend", Thin: "thin" })[s] || "pending";
+const statusKey = (s) => ({ LookNow: "look_now", GetReady: "get_ready", Uptrend: "uptrend", Broken: "broken", Range: "range", Downtrend: "downtrend", BreakingDown: "breaking_down", Thin: "thin" })[s] || "pending";
 function favouriteCard(f, v) {
   const L = f.levels, recs = {};
   (f.records || []).forEach((r) => (recs[r.kind] = r));

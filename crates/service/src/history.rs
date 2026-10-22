@@ -119,12 +119,10 @@ pub struct Period {
 }
 
 pub fn periods(days: &[StructureDay]) -> Vec<Period> {
-    let state = |d: &StructureDay| {
-        if d.status == "broken" {
-            "Broken".to_string()
-        } else {
-            d.trend.clone()
-        }
+    let state = |d: &StructureDay| match d.status.as_str() {
+        "broken" => "Broken".to_string(),
+        "breaking_down" => "BreakingDown".to_string(),
+        _ => d.trend.clone(),
     };
     let mut out: Vec<Period> = Vec::new();
     for d in days {

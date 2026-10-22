@@ -69,6 +69,9 @@ the plan, the one-year track record, and swing dots on the chart.
 higher low, it is marked ⚠ Uptrend broken, before the next swing confirms
 it. An optional notification (off by default) says so once per swing. A
 downtrend rising above its last lower high shows as "Downtrend breaking".
+A range or downtrend falling below its last swing low shows as ⚠ Breaking
+down ("avoid until a higher low forms"). Each swing in the card shows its
+date.
 
 **History.** The app keeps, on the phone:
 

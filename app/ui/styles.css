@@ -226,3 +226,6 @@ details summary { cursor: pointer; }
 .hist-row > span:first-child { white-space: nowrap; }
 .hist-row > span:last-child { text-align: right; }
 .xhair { z-index: 2; }
+.mk-falling { color: #fb923c; } .mk.mk-falling { background: rgba(251,146,60,.16); }
+.banner.falling { background: rgba(251,146,60,.10); border-color: rgba(251,146,60,.55); color: #fdba74; }
+.sw-date { font-size: 11px; opacity: .75; }

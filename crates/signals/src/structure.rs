@@ -13,7 +13,8 @@
 //! - **Downtrend broken**: in a downtrend, price clears the last lower high.
 //!
 //! Breaks are reported before the next swing is confirmed: an uptrend is
-//! broken as soon as price falls below the last higher low.
+//! broken as soon as price falls below the last higher low, and a range or
+//! downtrend is breaking down once price falls below the last swing low.
 
 use serde::Serialize;
 
@@ -335,6 +336,8 @@ pub enum Break {
     UptrendBroken,
     /// Price rose above the last lower high.
     DowntrendBreaking,
+    /// In a range or downtrend, price fell below the last swing low.
+    BreakingDown,
 }
 
 /// What to do with a stock right now, most urgent first.
@@ -347,6 +350,8 @@ pub enum Status {
     Broken,
     Range,
     Downtrend,
+    /// Range or downtrend, now below the last swing low: avoid.
+    BreakingDown,
     Thin,
 }
 
@@ -457,6 +462,13 @@ pub fn evaluate(s: &Structure, live: Option<&Live>, p: &Params, enabled: &[Signa
                 "Rose to {high_now:.2}, above the last lower high {h:.2}: downtrend breaking."
             )),
         ),
+        (Trend::Range | Trend::Down, Some(l), _) if low_now < l => (
+            Some(Break::BreakingDown),
+            Some(format!(
+                "Fell to {low_now:.2}, below the last low {l:.2}: {}. Avoid until a higher low forms.",
+                if s.trend == Trend::Range { "breaking down out of the range" } else { "making a new low" }
+            )),
+        ),
         _ => (None, None),
     };
 
@@ -472,6 +484,7 @@ pub fn evaluate(s: &Structure, live: Option<&Live>, p: &Params, enabled: &[Signa
     } else {
         match s.trend {
             Trend::Up if breaking.is_some() => Status::Broken,
+            _ if breaking == Some(Break::BreakingDown) => Status::BreakingDown,
             Trend::Up => Status::Uptrend,
             Trend::Range => Status::Range,
             Trend::Down => Status::Downtrend,
@@ -702,6 +715,31 @@ mod tests {
         let v = evaluate(&s, None, &p, &[]);
         assert_eq!(v.breaking, Some(Break::DowntrendBreaking));
         assert_eq!(v.status, Status::Downtrend);
+    }
+
+    #[test]
+    fn breaking_down_below_the_last_low() {
+        // Range (higher low 108 but a lower high 118), then a fall under the
+        // last low.
+        let mut c = legs(&[100.0, 120.0, 105.0, 125.0, 108.0, 118.0], 6);
+        c.extend(legs(&[118.0, 104.0], 6).into_iter().skip(1));
+        let bars = path(&c);
+        let p = params();
+        let s = analyze(&bars, &p).unwrap();
+        assert_eq!(s.trend, Trend::Range);
+        let v = evaluate(&s, None, &p, &SignalKind::STRUCTURE);
+        assert_eq!(v.breaking, Some(Break::BreakingDown));
+        assert_eq!(v.status, Status::BreakingDown);
+        assert!(v.break_note.unwrap().contains("out of the range"));
+
+        // Downtrend making a new low.
+        let mut c = legs(&[140.0, 120.0, 132.0, 110.0, 121.0], 7);
+        c.extend(legs(&[121.0, 105.0], 6).into_iter().skip(1));
+        let s = analyze(&path(&c), &p).unwrap();
+        assert_eq!(s.trend, Trend::Down);
+        let v = evaluate(&s, None, &p, &[]);
+        assert_eq!(v.breaking, Some(Break::BreakingDown));
+        assert!(v.break_note.unwrap().contains("new low"));
     }
 
     #[test]

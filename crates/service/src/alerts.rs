@@ -811,6 +811,7 @@ pub(crate) fn status_name(s: Status) -> &'static str {
         Status::GetReady => "get_ready",
         Status::Uptrend => "uptrend",
         Status::Broken => "broken",
+        Status::BreakingDown => "breaking_down",
         Status::Range => "range",
         Status::Downtrend => "downtrend",
         Status::Thin => "thin",
@@ -875,6 +876,10 @@ impl AppService {
                                     "below the last higher low {:.2}",
                                     st.last_low.unwrap_or(0.0)
                                 ),
+                            ),
+                            Some(Break::BreakingDown) => (
+                                "Breaking down".to_string(),
+                                format!("below the last low {:.2}", st.last_low.unwrap_or(0.0)),
                             ),
                             Some(Break::DowntrendBreaking) => (
                                 "Downtrend breaking".to_string(),
