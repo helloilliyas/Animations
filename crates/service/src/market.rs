@@ -55,9 +55,14 @@ pub struct MarketView<'a> {
 
 impl<'a> MarketView<'a> {
     pub fn new(m: &'a MarketData, phase: MarketPhase) -> Self {
-        let quotes: Vec<Quote> = m.quotes.values().cloned().collect();
+        // Only the latest session's trades count; the cache also keeps last
+        // prices of stocks that did not trade in it.
+        let day = |q: &Quote| q.last_traded_at.map(crate::chart::lk_day);
+        let latest = m.quotes.values().filter_map(day).max();
+        let session: Vec<&Quote> = m.quotes.values().filter(|q| day(q) == latest).collect();
+        let quotes: Vec<Quote> = session.iter().map(|q| (*q).clone()).collect();
         let mut breadth = Breadth::default();
-        for q in m.quotes.values().filter(|q| q.trades > 0) {
+        for q in session.iter().filter(|q| q.trades > 0) {
             match q.change.cmp(&Decimal::ZERO) {
                 std::cmp::Ordering::Greater => breadth.positive += 1,
                 std::cmp::Ordering::Less => breadth.negative += 1,
@@ -76,7 +81,7 @@ impl<'a> MarketView<'a> {
             top_turnover: top_by(TopMoverKind::Turnover, &quotes, 10),
             top_volume: top_by(TopMoverKind::ShareVolume, &quotes, 10),
             most_active: &m.most_active,
-            securities: m.quotes.len(),
+            securities: session.len(),
             updated_at: m.updated_at,
             errors: &m.errors,
         }

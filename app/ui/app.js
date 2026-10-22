@@ -201,6 +201,7 @@ function renderWatch() {
     <div class="toolbar">
       <select id="wl-select">${opts}</select>
       <button class="btn ghost small" id="wl-new">+ List</button>
+      <button class="btn ghost small" id="wl-import">Import</button>
     </div>
     <div class="toolbar">
       <input id="watch-search" placeholder="Search symbol or company" value="${esc(state.watch.filter)}" autocomplete="off">
@@ -227,6 +228,7 @@ function mountWatch(root) {
   };
   $("#watch-sort", root).onchange = (e) => { state.watch.sort = e.target.value; prefSet("watchSort", state.watch.sort); render(); };
   $("#wl-select", root).onchange = (e) => { state.watch.list = e.target.value; prefSet("watchList", state.watch.list); render(); };
+  $("#wl-import", root).onclick = () => openImport();
   $("#wl-new", root).onclick = async () => {
     const name = prompt("Watch list name");
     if (!name) return;
@@ -235,6 +237,45 @@ function mountWatch(root) {
     await loadWatchLists(); render();
   };
 }
+function openImport() {
+  const current = watchLists.find((w) => String(w.id) === String(state.watch.list));
+  openSheet(`
+    <div class="sheet-head"><h3>Import watch list</h3><button class="icon-btn" data-close>✕</button></div>
+    <label>List name</label>
+    <input id="im-name" value="${esc(current ? current.name : "My list")}" list="im-lists">
+    <datalist id="im-lists">${watchLists.map((w) => `<option value="${esc(w.name)}">`).join("")}</datalist>
+    <label>Company codes</label>
+    <textarea id="im-text" placeholder="ABAN, AEL, ACL&#10;or ABAN.N, JKH.N0000 …"></textarea>
+    <p class="muted small">Separate codes with commas, spaces or new lines. Codes without a class (ABAN) are taken as the ordinary share (ABAN.N0000).</p>
+    <label class="switch-row"><span>Replace the list's stocks<br><span class="small muted">Off: add to the existing stocks</span></span>
+      <input type="checkbox" id="im-replace" checked></label>
+    <div class="btn-row"><button class="btn primary" id="im-go">Import</button></div>
+    <div id="im-result"></div>`, (s) => {
+    $("#im-go", s).onclick = async () => {
+      const btn = $("#im-go", s);
+      btn.disabled = true; btn.textContent = "Checking codes…";
+      try {
+        const r = await call("import_watch_list", {
+          name: $("#im-name", s).value, text: $("#im-text", s).value, replace: $("#im-replace", s).checked,
+        });
+        const list = (label, xs, cls = "") => xs.length
+          ? `<div class="small"><b class="${cls}">${label} (${xs.length}):</b> ${xs.map((x) => esc(x.replace(".N0000", ""))).join(", ")}</div>` : "";
+        $("#im-result", s).innerHTML = `<div class="card" style="margin-top:12px">
+          <div><b>${esc(r.name)}</b>: ${r.count} stocks</div>
+          ${list("Newly in", r.added, "up")}${list("Newly out", r.removed, "down")}${list("Not found on the CSE", r.invalid, "down")}
+          ${!r.added.length && !r.removed.length ? `<div class="small muted">No changes.</div>` : ""}</div>`;
+        state.watch.list = String(r.id); prefSet("watchList", state.watch.list);
+        await loadWatchLists();
+        render();
+      } catch (e) {
+        toast(String(e.message || e), true);
+      } finally {
+        btn.disabled = false; btn.textContent = "Import";
+      }
+    };
+  });
+}
+
 async function loadWatchLists() { watchLists = await call("watch_lists"); }
 
 // ---------- Quote sheet ----------

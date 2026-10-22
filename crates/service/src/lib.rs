@@ -7,6 +7,7 @@
 
 mod alerts;
 mod chart;
+mod import_list;
 mod market;
 
 use std::collections::HashMap;
@@ -66,6 +67,8 @@ struct State {
     last_daily_save: Option<chrono::NaiveDate>,
     alerts: alerts::AlertBook,
     analysis: HashMap<String, alerts::Analysis>,
+    /// Day each favourite missing from the price list was looked up.
+    looked_up: HashMap<String, chrono::NaiveDate>,
 }
 
 pub struct AppService {
@@ -115,6 +118,7 @@ impl AppService {
                 last_daily_save: None,
                 alerts: alert_book,
                 analysis: HashMap::new(),
+                looked_up: HashMap::new(),
             }),
             clock,
             outbox: None,
@@ -202,7 +206,14 @@ impl AppService {
             // Before the open the CSE serves an empty list: keep the last prices.
             Ok(v) if v.is_empty() && !m.quotes.is_empty() => false,
             Ok(v) => {
-                m.quotes = v.into_iter().map(|q| (q.symbol.clone(), q)).collect();
+                let mut fresh: HashMap<String, Quote> =
+                    v.into_iter().map(|q| (q.symbol.clone(), q)).collect();
+                // The list only has stocks that traded today; keep the last
+                // known price of the others (e.g. favourites with no trades).
+                for (sym, q) in m.quotes.drain() {
+                    fresh.entry(sym).or_insert(q);
+                }
+                m.quotes = fresh;
                 true
             }
             Err(e) => {
@@ -262,6 +273,9 @@ impl AppService {
         }
         if let Some(r) = self.alerts_command(cmd, args.clone()) {
             return r;
+        }
+        if cmd == "import_watch_list" {
+            return self.import_watch_list(args).await;
         }
         if cmd == "quote" {
             // Fetch detail for symbols not in the all-share list (e.g. debt).

@@ -521,3 +521,47 @@ async fn empty_pre_open_price_list_keeps_last_prices() {
         279
     );
 }
+
+#[tokio::test]
+async fn import_watch_list_from_codes() {
+    let mut r = routes("Market Closed");
+    r.remove("companyInfoSummery"); // lookups for untraded codes fail here
+    let h = Harness::with_routes(r, lk_on(17, 10, 0)).await;
+    h.call("refresh", Value::Null).await;
+
+    let res = h
+        .call(
+            "import_watch_list",
+            json!({"name": "Shariah", "text": "ABAN.N, jkh\nCOMB.N0000; NOPE.N"}),
+        )
+        .await;
+    assert_eq!(res["count"], 3);
+    assert_eq!(
+        res["added"],
+        json!(["ABAN.N0000", "JKH.N0000", "COMB.N0000"])
+    );
+    assert_eq!(res["invalid"], json!(["NOPE.N0000"]));
+
+    // Re-import replaces: JKH and COMB out, HNB in.
+    let res = h
+        .call(
+            "import_watch_list",
+            json!({"name": "Shariah", "text": "ABAN HNB"}),
+        )
+        .await;
+    assert_eq!(res["added"], json!(["HNB.N0000"]));
+    assert_eq!(res["removed"], json!(["COMB.N0000", "JKH.N0000"]));
+    let lists = h.call("watch_lists", Value::Null).await;
+    assert_eq!(lists[0]["symbols"], json!(["ABAN.N0000", "HNB.N0000"]));
+
+    // Nothing valid: a clear error, list untouched.
+    let err = h
+        .svc
+        .dispatch(
+            "import_watch_list",
+            json!({"name": "Shariah", "text": "XXQ.N"}),
+        )
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("none of the codes"));
+}

@@ -179,13 +179,14 @@ impl AppService {
 
     /// Called after every market refresh.
     pub(crate) async fn update_alerts(&self) -> Result<()> {
+        let favourites = self.favourites()?;
+        let now = self.now();
+        let today = lk_day(now);
+        self.look_up_missing(&favourites, today).await;
         let book = self.state.read().unwrap().alerts.clone();
         if !book.enabled {
             return Ok(());
         }
-        let favourites = self.favourites()?;
-        let now = self.now();
-        let today = lk_day(now);
         let params = book.params.clone();
 
         // 1. Daily levels and track records, once a day per stock.
@@ -253,8 +254,9 @@ impl AppService {
             for sym in &favourites {
                 let due = {
                     let s = self.state.read().unwrap();
+                    // Only liquid stocks: illiquid ones never signal anyway.
                     s.analysis.get(sym).is_some_and(|a| {
-                        a.levels.is_some()
+                        a.levels.as_ref().is_some_and(|l| l.liquid)
                             && a.intraday_at
                                 .is_none_or(|t| now - t >= Duration::minutes(INTRADAY_EVERY_MIN))
                     })
@@ -393,6 +395,31 @@ impl AppService {
         self.save_book(&book)?;
         self.write_outbox(&fired);
         Ok(())
+    }
+
+    /// Fetches quotes for favourites that are not in today's price list
+    /// (stocks that have not traded), a few per refresh, once a day each.
+    async fn look_up_missing(&self, favourites: &BTreeSet<String>, today: NaiveDate) {
+        const PER_REFRESH: usize = 10;
+        let missing: Vec<String> = {
+            let s = self.state.read().unwrap();
+            favourites
+                .iter()
+                .filter(|f| {
+                    !s.market.quotes.contains_key(*f) && s.looked_up.get(*f) != Some(&today)
+                })
+                .take(PER_REFRESH)
+                .cloned()
+                .collect()
+        };
+        for sym in missing {
+            let q = self.client.quote(&sym).await;
+            let mut s = self.state.write().unwrap();
+            s.looked_up.insert(sym.clone(), today);
+            if let Ok(q) = q {
+                s.market.quotes.entry(sym).or_insert(q);
+            }
+        }
     }
 
     /// Appends fired alerts to the outbox file read by the Android service.
