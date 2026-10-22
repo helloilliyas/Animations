@@ -17,12 +17,16 @@
 //! same rules. Signals are prompts to look at a stock, not advice.
 
 pub mod indicators;
+pub mod structure;
 
 use indicators::{prior_max, prior_mean, rsi, sma, RsiState};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum SignalKind {
+    HigherLowEntry,
+    UptrendConfirmed,
+    DowntrendBroken,
     Breakout,
     Pullback,
     TrendTurn,
@@ -32,6 +36,12 @@ pub enum SignalKind {
 }
 
 impl SignalKind {
+    /// Market-structure setups (see [`structure`]).
+    pub const STRUCTURE: [SignalKind; 3] = [
+        SignalKind::HigherLowEntry,
+        SignalKind::UptrendConfirmed,
+        SignalKind::DowntrendBroken,
+    ];
     pub const DAILY: [SignalKind; 4] = [
         SignalKind::Breakout,
         SignalKind::Pullback,
@@ -42,6 +52,9 @@ impl SignalKind {
 
     pub fn label(self) -> &'static str {
         match self {
+            SignalKind::HigherLowEntry => "Higher low entry",
+            SignalKind::UptrendConfirmed => "Uptrend confirmed",
+            SignalKind::DowntrendBroken => "Downtrend broken",
             SignalKind::Breakout => "Breakout",
             SignalKind::Pullback => "Pullback in uptrend",
             SignalKind::TrendTurn => "Trend turn (20/50 cross)",
@@ -94,6 +107,21 @@ pub struct Params {
     /// Trend-turn levels further than this (percent above the last close)
     /// are unreachable in a session and are not offered.
     pub max_level_distance_pct: f64,
+    /// Smallest reversal (percent) that counts as a swing.
+    pub min_swing_pct: f64,
+    /// Swing threshold as a multiple of the typical daily range, if larger.
+    pub swing_range_mult: f64,
+    /// Smallest weekly swing, percent.
+    pub weekly_min_swing_pct: f64,
+    /// Minimum potential gain / risk for structure setups.
+    pub min_reward_risk: f64,
+    /// "Get ready" when price is within this percent below a trigger.
+    pub near_pct: f64,
+    /// Stop sits this percent below the swing low.
+    pub stop_buffer_pct: f64,
+    /// Bounce off a pullback low, as a share of the swing threshold, that
+    /// confirms a higher low.
+    pub bounce_frac: f64,
 }
 
 impl Default for Params {
@@ -114,6 +142,13 @@ impl Default for Params {
             opening_range_minutes: 30,
             spike_mult: 3.0,
             max_level_distance_pct: 10.0,
+            min_swing_pct: 5.0,
+            swing_range_mult: 2.0,
+            weekly_min_swing_pct: 10.0,
+            min_reward_risk: 2.0,
+            near_pct: 2.0,
+            stop_buffer_pct: 1.0,
+            bounce_frac: 0.5,
         }
     }
 }

@@ -78,3 +78,33 @@ fn track_record_runs_on_real_history() {
         );
     }
 }
+
+#[test]
+fn structure_on_real_history() {
+    use cse_signals::structure::{analyze, evaluate, track_record, Trend};
+    let bars = jkh_bars();
+    let p = Params::default();
+    let s = analyze(&bars, &p).unwrap();
+    println!(
+        "JKH threshold {:.1}% trend {:?} weekly {:?} swings {:?}",
+        s.threshold_pct,
+        s.trend,
+        s.weekly_trend,
+        s.swings
+            .iter()
+            .map(|w| (w.price, w.label))
+            .collect::<Vec<_>>()
+    );
+    // JKH fell from ~23 to 18 over the year: not an uptrend.
+    assert_ne!(s.trend, Trend::Up);
+    assert!(s.threshold_pct >= 5.0);
+    let v = evaluate(&s, None, &p, &SignalKind::STRUCTURE);
+    println!("status {:?} setups {:?}", v.status, v.setups);
+    for r in track_record(&bars, &p, &SignalKind::STRUCTURE) {
+        assert!(r.wins <= r.fired && r.fired < 40);
+        println!(
+            "{:?}: fired {} wins {} avg {:+.2}%",
+            r.kind, r.fired, r.wins, r.avg_return_pct
+        );
+    }
+}
