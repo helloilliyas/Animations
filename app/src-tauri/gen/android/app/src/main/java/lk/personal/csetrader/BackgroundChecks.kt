@@ -1,19 +1,16 @@
 package lk.personal.csetrader
 
+import android.app.job.JobInfo
+import android.app.job.JobParameters
+import android.app.job.JobScheduler
+import android.app.job.JobService
+import android.content.ComponentName
 import android.content.Context
-import androidx.work.Constraints
-import androidx.work.ExistingPeriodicWorkPolicy
-import androidx.work.NetworkType
-import androidx.work.PeriodicWorkRequestBuilder
-import androidx.work.WorkManager
-import androidx.work.Worker
-import androidx.work.WorkerParameters
 import org.json.JSONObject
 import java.io.File
 import java.io.RandomAccessFile
 import java.util.Calendar
 import java.util.TimeZone
-import java.util.concurrent.TimeUnit
 
 /** The Rust check in libcse_trader_lib (see `src/lib.rs`). */
 object NativeCheck {
@@ -73,52 +70,65 @@ object Outbox {
 }
 
 /**
- * Timed background checks (every 15, 30 or 60 minutes). Runs the Rust
- * check during trading hours on weekdays, plus once after the close.
+ * Timed background checks (every 15, 30 or 60 minutes) with Android's
+ * JobScheduler. Runs the Rust check during trading hours on weekdays,
+ * plus once after the close.
  */
-class CheckWorker(ctx: Context, params: WorkerParameters) : Worker(ctx, params) {
+class CheckJob : JobService() {
     companion object {
-        private const val WORK = "structure-checks"
+        private const val JOB_ID = 7101
 
         /** 0 cancels the checks. */
         fun schedule(ctx: Context, minutes: Int) {
-            val wm = WorkManager.getInstance(ctx)
+            val js = ctx.getSystemService(JobScheduler::class.java)
             if (minutes <= 0) {
-                wm.cancelUniqueWork(WORK)
+                js.cancel(JOB_ID)
                 return
             }
-            val request = PeriodicWorkRequestBuilder<CheckWorker>(minutes.toLong(), TimeUnit.MINUTES)
-                .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
+            val period = minutes * 60_000L
+            val existing = js.getPendingJob(JOB_ID)
+            if (existing != null && existing.intervalMillis == period) return
+            val job = JobInfo.Builder(JOB_ID, ComponentName(ctx, CheckJob::class.java))
+                .setPeriodic(period)
+                .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY)
+                .setPersisted(true)
                 .build()
-            wm.enqueueUniquePeriodicWork(WORK, ExistingPeriodicWorkPolicy.UPDATE, request)
+            js.schedule(job)
+        }
+
+        /** Whether a check is due now (Sri Lanka time). */
+        private fun due(ctx: Context): Pair<Boolean, Boolean> {
+            val prefs = ctx.getSharedPreferences(AlertService.PREFS, Context.MODE_PRIVATE)
+            val now = Calendar.getInstance(TimeZone.getTimeZone("Asia/Colombo"))
+            val day = now.get(Calendar.DAY_OF_WEEK)
+            if (day == Calendar.SATURDAY || day == Calendar.SUNDAY) return false to false
+            val minutes = now.get(Calendar.HOUR_OF_DAY) * 60 + now.get(Calendar.MINUTE)
+            val today = "%d-%d".format(now.get(Calendar.YEAR), now.get(Calendar.DAY_OF_YEAR))
+            val trading = minutes in (9 * 60 + 25)..(14 * 60 + 30)
+            val afterClose = minutes in (14 * 60 + 31)..(17 * 60 + 30) &&
+                prefs.getString("closing_check", null) != today
+            if (afterClose) prefs.edit().putString("closing_check", today).apply()
+            return (trading || afterClose) to afterClose
         }
     }
 
-    override fun doWork(): Result {
+    override fun onStartJob(params: JobParameters): Boolean {
         // Live mode checks continuously on its own.
-        if (AlertService.running) return Result.success()
-        val prefs = applicationContext.getSharedPreferences(AlertService.PREFS, Context.MODE_PRIVATE)
-        val now = Calendar.getInstance(TimeZone.getTimeZone("Asia/Colombo"))
-        val day = now.get(Calendar.DAY_OF_WEEK)
-        if (day == Calendar.SATURDAY || day == Calendar.SUNDAY) return Result.success()
-        val minutes = now.get(Calendar.HOUR_OF_DAY) * 60 + now.get(Calendar.MINUTE)
-        val today = "%d-%d".format(now.get(Calendar.YEAR), now.get(Calendar.DAY_OF_YEAR))
-        val trading = minutes in (9 * 60 + 25)..(14 * 60 + 30)
-        val afterClose = minutes in (14 * 60 + 31)..(17 * 60 + 30) &&
-            prefs.getString("closing_check", null) != today
-        if (!trading && !afterClose) return Result.success()
-
-        val outbox = Outbox.path(applicationContext) ?: return Result.success()
+        if (AlertService.running || !due(this).first) return false
+        val outbox = Outbox.path(this) ?: return false
         val db = File(File(outbox).parentFile, "cse-trader.sqlite")
-        if (!db.exists()) return Result.success()
-        val n = try {
-            NativeCheck.runCheck(db.absolutePath)
-        } catch (_: Throwable) {
-            -1
-        }
-        if (n < 0) return Result.retry()
-        if (afterClose) prefs.edit().putString("closing_check", today).apply()
-        Outbox.drain(applicationContext)
-        return Result.success()
+        if (!db.exists()) return false
+        Thread {
+            val n = try {
+                NativeCheck.runCheck(db.absolutePath)
+            } catch (_: Throwable) {
+                -1
+            }
+            if (n >= 0) Outbox.drain(this)
+            jobFinished(params, false)
+        }.start()
+        return true
     }
+
+    override fun onStopJob(params: JobParameters): Boolean = false
 }

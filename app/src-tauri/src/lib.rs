@@ -29,11 +29,35 @@ async fn call(
     cmd: String,
     args: Value,
 ) -> Result<Value, String> {
-    service.dispatch(&cmd, args).await.map_err(|e| e.to_string())
+    service
+        .dispatch(&cmd, args)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Saves Rust panics where Android's CrashCatcher shows them on the next start.
+#[cfg(target_os = "android")]
+fn record_panics() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let default = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let _ = std::fs::write(
+                "/data/data/lk.personal.csetrader/files/rust-panic.txt",
+                format!(
+                    "Rust panic: {info}\n{}",
+                    std::backtrace::Backtrace::force_capture()
+                ),
+            );
+            default(info);
+        }));
+    });
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    #[cfg(target_os = "android")]
+    record_panics();
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
@@ -59,6 +83,7 @@ pub extern "system" fn Java_lk_personal_csetrader_NativeCheck_runCheck(
     _class: jni::objects::JClass,
     db: jni::objects::JString,
 ) -> jni::sys::jint {
+    record_panics();
     let Ok(db) = env.get_string(&db).map(String::from) else {
         return -1;
     };

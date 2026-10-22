@@ -7,6 +7,8 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <!-- Timed background checks survive a restart -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
     <!-- AndroidTV support -->
     <uses-feature android:name="android.software.leanback" android:required="false" />
@@ -38,6 +40,17 @@
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="Stock price alerts for the user's watch list during exchange trading hours" />
         </service>
+
+        <service
+            android:name=".CheckJob"
+            android:exported="false"
+            android:permission="android.permission.BIND_JOB_SERVICE" />
+
+        <provider
+            android:name=".CrashCatcher"
+            android:authorities="${applicationId}.crashcatcher"
+            android:exported="false"
+            android:initOrder="1000" />
 
         <provider
           android:name="androidx.core.content.FileProvider"
