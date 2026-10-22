@@ -78,6 +78,8 @@ pub struct AppService {
     clock: Clock,
     /// File the Android background service reads alert notifications from.
     outbox: Option<std::path::PathBuf>,
+    /// One refresh at a time (UI, poller and scheduled checks share it).
+    refreshing: tokio::sync::Mutex<()>,
 }
 
 impl AppService {
@@ -128,6 +130,7 @@ impl AppService {
             }),
             clock,
             outbox: None,
+            refreshing: tokio::sync::Mutex::new(()),
         })
     }
 
@@ -157,6 +160,7 @@ impl AppService {
     /// Fetches all feeds, updates the cache, fills paper orders and stores
     /// snapshots. Individual feed failures are recorded, not fatal.
     pub async fn refresh(&self) -> Result<()> {
+        let _one = self.refreshing.lock().await;
         self.refresh_market().await?;
         self.update_alerts().await
     }

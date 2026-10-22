@@ -835,6 +835,7 @@ const bgBridge = (() => {
       isRunning: () => send("isRunning"),
       wanted: () => send("wanted"),
       notify: (id, title, body) => send("notify", { nid: Number(id), title, body }),
+      lastCrash: () => send("lastCrash"),
       schedule: async (minutes) => send("schedule", { minutes, path: await outboxPath() }),
       drain: async () => send("drain", { path: await outboxPath() }),
     });
@@ -1115,6 +1116,15 @@ async function restoreBackground() {
   else await call("update_alert_config", { background: false, background_mode: "30" }).then(() => br.schedule(30));
 }
 
+// If the app crashed last time, show the details so they can be reported.
+async function showLastCrash() {
+  const br = bgBridge();
+  const text = br && (await br.lastCrash());
+  if (!text) return;
+  openSheet(`<div class="sheet-head"><h3>The app closed unexpectedly last time</h3><button class="icon-btn" data-close>✕</button></div>
+    <p class="muted small">Copy this and send it to get it fixed.</p><textarea readonly>${esc(text)}</textarea>`);
+}
+
 // ---------- Settings ----------
 async function openSettings() {
   const [settings, account] = await Promise.all([call("settings"), call("account")]);
@@ -1213,10 +1223,13 @@ async function poll() {
 }
 
 (async function init() {
-  try { await call("refresh"); } catch { /* poll will retry */ }
+  // Show saved data at once; the first refresh can take a while (history
+  // downloads for many favourites) and the 5-second poll picks it up.
   await loadWatchLists().catch(() => {});
-  restoreBackground().catch(() => {});
   await poll();
   render();
   setInterval(poll, 5000);
+  call("refresh").then(poll).catch(() => {});
+  restoreBackground().catch(() => {});
+  showLastCrash().catch(() => {});
 })();

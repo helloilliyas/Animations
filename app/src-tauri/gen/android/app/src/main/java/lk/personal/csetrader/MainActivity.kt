@@ -19,8 +19,22 @@ import org.json.JSONObject
 
 class MainActivity : TauriActivity() {
   override fun onCreate(savedInstanceState: Bundle?) {
+    recordCrashes()
     enableEdgeToEdge()
     super.onCreate(savedInstanceState)
+  }
+
+  /** Saves the last crash so the app can show it on the next start. */
+  private fun recordCrashes() {
+    val previous = Thread.getDefaultUncaughtExceptionHandler()
+    val file = java.io.File(filesDir, "last-crash.txt")
+    Thread.setDefaultUncaughtExceptionHandler { thread, e ->
+      try {
+        file.writeText("${java.util.Date()}\n${android.util.Log.getStackTraceString(e)}")
+      } catch (_: Exception) {
+      }
+      previous?.uncaughtException(thread, e)
+    }
   }
 
   /**
@@ -35,7 +49,7 @@ class MainActivity : TauriActivity() {
     WebViewCompat.addWebMessageListener(webView, "CseBackgroundPort", origins) { _, message, _, isMainFrame, reply ->
       if (!isMainFrame) return@addWebMessageListener
       val m = try { JSONObject(message.data ?: "{}") } catch (_: Exception) { return@addWebMessageListener }
-      val result: Any = when (m.optString("cmd")) {
+      val result: Any = try { when (m.optString("cmd")) {
         "start" -> {
           requestNotificationPermission()
           requestBatteryExemption()
@@ -69,7 +83,14 @@ class MainActivity : TauriActivity() {
           Notifier.alert(this, 10_000 + m.optInt("nid"), m.optString("title"), m.optString("body"))
           true
         }
+        // Shows (and clears) the crash saved by recordCrashes.
+        "lastCrash" -> {
+          val f = java.io.File(filesDir, "last-crash.txt")
+          if (f.exists()) f.readText().also { f.delete() } else ""
+        }
         else -> false
+      } } catch (e: Exception) {
+        "error: $e"
       }
       reply.postMessage(JSONObject().put("id", m.optInt("id")).put("result", result).toString())
     }
