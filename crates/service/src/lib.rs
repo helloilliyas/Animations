@@ -7,6 +7,7 @@
 
 mod alerts;
 mod chart;
+mod history;
 mod import_list;
 mod market;
 
@@ -34,6 +35,10 @@ const REAL_KEY: &str = "real_portfolio";
 /// Price snapshots are kept at most this often, and for this long.
 const SNAPSHOT_EVERY: i64 = 60;
 const SNAPSHOT_DAYS: i64 = 90;
+/// Copy of the whole market view, shown before the next session's prices.
+const MARKET_COPY_KEY: &str = "market_copy";
+/// Seconds between market copies during the session.
+const COPY_EVERY: i64 = 300;
 pub const DEFAULT_STARTING_CASH: Decimal = Decimal::from_parts(1_000_000, 0, 0, false, 0);
 
 pub type Clock = Arc<dyn Fn() -> DateTime<Utc> + Send + Sync>;
@@ -69,6 +74,8 @@ struct State {
     analysis: HashMap<String, alerts::Analysis>,
     /// Day each favourite missing from the price list was looked up.
     looked_up: HashMap<String, chrono::NaiveDate>,
+    /// When the market copy was last saved.
+    copy_saved_at: Option<DateTime<Utc>>,
 }
 
 pub struct AppService {
@@ -112,21 +119,35 @@ impl AppService {
         if alert_book.migrate() {
             store.save_json(alerts::ALERTS_KEY, &alert_book)?;
         }
+        // Alerts from before the permanent log (already-logged ids are kept).
+        let rows: Vec<_> = alert_book.history.iter().map(history::alert_row).collect();
+        store.log_alerts(&rows)?;
         let synced: HashMap<String, chrono::NaiveDate> =
             store.load_json(alerts::SYNCED_KEY)?.unwrap_or_default();
+        // Last prices from the previous run, until the CSE serves new ones.
+        // A copy that cannot be read is ignored rather than blocking start-up.
+        let market = match store.load_json::<MarketData>(MARKET_COPY_KEY) {
+            Ok(Some(mut m)) => {
+                m.saved_copy = m.saved_copy.or(m.updated_at);
+                m.errors.clear();
+                m
+            }
+            _ => MarketData::default(),
+        };
         Ok(Self {
             client,
             store: Mutex::new(store),
             state: RwLock::new(State {
                 account,
                 real,
-                market: MarketData::default(),
+                market,
                 last_snapshot: None,
                 synced,
                 last_daily_save: None,
                 alerts: alert_book,
                 analysis: HashMap::new(),
                 looked_up: HashMap::new(),
+                copy_saved_at: None,
             }),
             clock,
             outbox: None,
@@ -181,6 +202,8 @@ impl AppService {
         let mut errors = Vec::new();
         let mut note = |name: &str, e: &cse_client::Error| errors.push(format!("{name}: {e}"));
 
+        // Before the open the CSE serves empty lists: keep the last ones.
+        let no_session = matches!(&quotes, Ok(v) if v.is_empty());
         let mut guard = self.state.write().unwrap();
         let s = &mut *guard;
         let m = &mut s.market;
@@ -189,26 +212,32 @@ impl AppService {
             Err(e) => note("market status", &e),
         }
         match aspi {
+            Ok(v) if v.value.is_zero() && m.aspi.is_some() => {}
             Ok(v) => m.aspi = Some(v),
             Err(e) => note("ASPI", &e),
         }
         match snp {
+            Ok(v) if v.value.is_zero() && m.snp_sl20.is_some() => {}
             Ok(v) => m.snp_sl20 = Some(v),
             Err(e) => note("S&P SL20", &e),
         }
         match summary {
+            Ok(_) if no_session && m.summary.is_some() => {}
             Ok(v) => m.summary = Some(v),
             Err(e) => note("market summary", &e),
         }
         match gainers {
+            Ok(v) if v.is_empty() && no_session => {}
             Ok(v) => m.gainers = v,
             Err(e) => note("top gainers", &e),
         }
         match losers {
+            Ok(v) if v.is_empty() && no_session => {}
             Ok(v) => m.losers = v,
             Err(e) => note("top losers", &e),
         }
         match active {
+            Ok(v) if v.is_empty() && no_session => {}
             Ok(v) => m.most_active = v,
             Err(e) => note("most active", &e),
         }
@@ -224,6 +253,9 @@ impl AppService {
                     fresh.entry(sym).or_insert(q);
                 }
                 m.quotes = fresh;
+                if !no_session {
+                    m.saved_copy = None;
+                }
                 true
             }
             Err(e) => {
@@ -262,6 +294,23 @@ impl AppService {
         if fresh_quotes {
             self.save_session_closes(s, &mut store, now)?;
         }
+        // Keep a copy for the next start: every few minutes in the session
+        // and once after the close (the day's final prices).
+        let phase = s.account.settings.calendar.phase_at(now);
+        let close = s.account.settings.calendar.close_on(chart::lk_day(now));
+        let copy_due = fresh_quotes
+            && !no_session
+            && s.market.saved_copy.is_none()
+            && match phase {
+                MarketPhase::Open => s
+                    .copy_saved_at
+                    .is_none_or(|t| now - t >= Duration::seconds(COPY_EVERY)),
+                _ => close.is_some_and(|c| now >= c && s.copy_saved_at.is_none_or(|t| t < c)),
+            };
+        if copy_due {
+            store.save_json(MARKET_COPY_KEY, &s.market)?;
+            s.copy_saved_at = Some(now);
+        }
         // Expiry or queue changes alter the account even without fills.
         store.save_json(ACCOUNT_KEY, &s.account)?;
         Ok(())
@@ -280,6 +329,9 @@ impl AppService {
         }
         if cmd == "chart" {
             return self.chart(args).await;
+        }
+        if let Some(r) = self.history_command(cmd, args.clone()) {
+            return r;
         }
         if let Some(r) = self.alerts_command(cmd, args.clone()) {
             return r;

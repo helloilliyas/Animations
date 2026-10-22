@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 use chrono::{DateTime, Duration, NaiveDate, Utc};
 use cse_core::{ChartRange, MarketPhase};
-use cse_signals::structure::{self, Status, Structure};
+use cse_signals::structure::{self, Break, Status, Structure};
 use cse_signals::{
     daily_levels, evaluate_daily, evaluate_intraday, track_record, Bar, DailyLevels,
     IntradayLevels, Live, Params, SignalKind, TrackRecord, Trigger,
@@ -31,6 +31,7 @@ const BOOK_VERSION: u32 = 2;
 const HISTORY_LIMIT: usize = 200;
 /// Daily histories fetched per refresh, to spread requests out.
 const SYNCS_PER_REFRESH: usize = 10;
+const UPTREND_BROKEN: &str = "Uptrend broken";
 /// How long after the close the closing check of structure setups runs.
 const CLOSING_CHECK_HOURS: i64 = 3;
 /// Minutes between intraday trade fetches per stock.
@@ -57,6 +58,17 @@ pub struct FiredAlert {
     pub level: f64,
     pub price: f64,
     pub message: String,
+    /// Entry, stop and target for market-structure entries; their results
+    /// are tracked from later daily prices.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<AlertPlan>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct AlertPlan {
+    pub entry: f64,
+    pub stop: f64,
+    pub target: f64,
 }
 
 /// How prices are checked when the app is closed (Android).
@@ -87,6 +99,8 @@ pub struct AlertBook {
     pub background_mode: BackgroundMode,
     /// Also notify when a stock comes within reach of a trigger.
     pub notify_get_ready: bool,
+    /// Notify when a favourite's uptrend breaks (price below the last higher low).
+    pub notify_broken: bool,
     /// Missing in settings saved before v2, so those load as 0 and migrate.
     #[serde(default)]
     pub version: u32,
@@ -106,6 +120,7 @@ impl Default for AlertBook {
             background: false,
             background_mode: BackgroundMode::Every30,
             notify_get_ready: false,
+            notify_broken: false,
             version: BOOK_VERSION,
             custom: Vec::new(),
             history: Vec::new(),
@@ -186,6 +201,7 @@ struct ConfigArgs {
     background: Option<bool>,
     background_mode: Option<BackgroundMode>,
     notify_get_ready: Option<bool>,
+    notify_broken: Option<bool>,
     signals: Option<BTreeMap<SignalKind, bool>>,
     params: Option<Params>,
 }
@@ -208,7 +224,7 @@ struct AfterArg {
     after_id: u64,
 }
 
-fn to_f64(d: Decimal) -> f64 {
+pub(crate) fn to_f64(d: Decimal) -> f64 {
     d.to_f64().unwrap_or(0.0)
 }
 
@@ -230,7 +246,7 @@ impl AppService {
     }
 
     /// Daily bars for a symbol, excluding `today` (still forming).
-    fn daily_bars(&self, symbol: &str, today: NaiveDate) -> Result<Vec<Bar>> {
+    pub(crate) fn daily_bars(&self, symbol: &str, today: NaiveDate) -> Result<Vec<Bar>> {
         let points = self.store.lock().unwrap().daily_history(symbol, None)?;
         Ok(points
             .into_iter()
@@ -296,6 +312,8 @@ impl AppService {
             a.records = track_record(&bars, &params);
             a.structure = structure::analyze(&bars, &params);
             a.structure_records = structure::track_record(&bars, &params, &SignalKind::STRUCTURE);
+            // History problems must not stop alerts.
+            let _ = self.record_history(&sym, &bars, &params, &book.enabled_structure());
             if a.levels.is_none() && a.error.is_none() {
                 a.error = Some(format!("Not enough history yet ({} days)", bars.len()));
             }
@@ -458,7 +476,32 @@ impl AppService {
                             level: x.trigger,
                             price,
                             message,
+                            plan: x.triggered.then_some(AlertPlan {
+                                entry: x.plan.entry,
+                                stop: x.plan.stop,
+                                target: x.plan.target,
+                            }),
                         });
+                    }
+                    // A favourite losing its uptrend, once per swing (optional).
+                    if book.notify_broken && view.breaking == Some(Break::UptrendBroken) {
+                        let key = format!("{sym}|Broken|{}", st.swing_key);
+                        if let std::collections::btree_map::Entry::Vacant(e) =
+                            book.last_fired.entry(key)
+                        {
+                            e.insert(now);
+                            let id = book.take_id();
+                            fired.push(FiredAlert {
+                                id,
+                                at: now,
+                                symbol: sym.clone(),
+                                kind: UPTREND_BROKEN.into(),
+                                level: st.last_low.unwrap_or(price),
+                                price,
+                                message: view.break_note.clone().unwrap_or_default(),
+                                plan: None,
+                            });
+                        }
                     }
                 }
             }
@@ -488,6 +531,7 @@ impl AppService {
                     level: t.level,
                     price,
                     message: t.message,
+                    plan: None,
                 });
             }
         }
@@ -520,6 +564,7 @@ impl AppService {
                         },
                         c.price
                     ),
+                    plan: None,
                 });
             }
         }
@@ -535,6 +580,7 @@ impl AppService {
         s.alerts = book.clone();
         drop(guard);
         self.save_book(&book)?;
+        self.log_alerts(&fired)?;
         self.write_outbox(&fired);
         Ok(())
     }
@@ -614,6 +660,9 @@ impl AppService {
                     }
                     if let Some(v) = a.notify_get_ready {
                         b.notify_get_ready = v;
+                    }
+                    if let Some(v) = a.notify_broken {
+                        b.notify_broken = v;
                     }
                     if let Some(v) = a.signals {
                         b.signals.extend(v);
@@ -728,6 +777,7 @@ impl AppService {
             "background": b.background,
             "background_mode": b.background_mode,
             "notify_get_ready": b.notify_get_ready,
+            "notify_broken": b.notify_broken,
             "signals": b.signals,
             "labels": labels,
             "structure_labels": structure_labels,
@@ -755,11 +805,12 @@ fn live_of(q: &cse_core::Quote) -> Option<Live> {
     })
 }
 
-fn status_name(s: Status) -> &'static str {
+pub(crate) fn status_name(s: Status) -> &'static str {
     match s {
         Status::LookNow => "look_now",
         Status::GetReady => "get_ready",
         Status::Uptrend => "uptrend",
+        Status::Broken => "broken",
         Status::Range => "range",
         Status::Downtrend => "downtrend",
         Status::Thin => "thin",
@@ -817,7 +868,23 @@ impl AppService {
                                 )
                             },
                         ),
-                        _ => (String::new(), String::new()),
+                        _ => match view.breaking {
+                            Some(Break::UptrendBroken) => (
+                                UPTREND_BROKEN.to_string(),
+                                format!(
+                                    "below the last higher low {:.2}",
+                                    st.last_low.unwrap_or(0.0)
+                                ),
+                            ),
+                            Some(Break::DowntrendBreaking) => (
+                                "Downtrend breaking".to_string(),
+                                format!(
+                                    "above the last lower high {:.2}",
+                                    st.last_high.unwrap_or(0.0)
+                                ),
+                            ),
+                            None => (String::new(), String::new()),
+                        },
                     };
                     json!({
                         "status": status_name(status),

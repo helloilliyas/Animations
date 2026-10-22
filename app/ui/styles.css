@@ -199,3 +199,15 @@ details.indicators { margin-top: 8px; }
 details summary { cursor: pointer; }
 .struct-settings { margin-top: 10px; }
 .fav-card .struct { margin-top: 6px; padding: 10px; background: var(--panel-2); }
+
+/* history and results */
+.mk-broken { color: #fbbf24; } .mk.mk-broken { background: rgba(251,191,36,.16); }
+.banner.warn { border-color: rgba(251,191,36,.6); }
+.hist { margin-top: 10px; }
+.hist-body { margin-top: 8px; }
+.hist-h { font-size: 12px; text-transform: uppercase; letter-spacing: .6px; color: var(--muted); margin: 12px 0 4px; }
+.hist-row { display: flex; justify-content: space-between; gap: 10px; padding: 5px 0; border-bottom: 1px solid var(--line); font-size: 14px; }
+.hist-row:last-child { border-bottom: 0; }
+.result-card { margin-bottom: 8px; padding: 10px 14px; }
+.hist-row > span:first-child { white-space: nowrap; }
+.hist-row > span:last-child { text-align: right; }

@@ -8,10 +8,11 @@ use cse_core::{
     ActiveStock, IndexValue, MarketPhase, MarketSummary, Quote, TopMover, TopMoverKind,
 };
 use rust_decimal::Decimal;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// Latest data from the CSE feeds.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct MarketData {
     pub status: Option<String>,
     pub aspi: Option<IndexValue>,
@@ -24,6 +25,9 @@ pub struct MarketData {
     pub updated_at: Option<DateTime<Utc>>,
     /// Feeds that failed on the last refresh.
     pub errors: Vec<String>,
+    /// Set while showing the copy saved by an earlier run (time it was
+    /// saved), until the CSE serves prices for a session again.
+    pub saved_copy: Option<DateTime<Utc>>,
 }
 
 /// Counts of securities up, down and unchanged ("buy sentiment").
@@ -51,6 +55,7 @@ pub struct MarketView<'a> {
     pub securities: usize,
     pub updated_at: Option<DateTime<Utc>>,
     pub errors: &'a [String],
+    pub saved_copy: Option<DateTime<Utc>>,
 }
 
 impl<'a> MarketView<'a> {
@@ -84,6 +89,7 @@ impl<'a> MarketView<'a> {
             securities: session.len(),
             updated_at: m.updated_at,
             errors: &m.errors,
+            saved_copy: m.saved_copy,
         }
     }
 }

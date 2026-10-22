@@ -11,6 +11,9 @@
 //!   previous swing low bounces by `bounce_frac` of the threshold.
 //! - **Uptrend confirmed**: after a higher low, price clears the last high.
 //! - **Downtrend broken**: in a downtrend, price clears the last lower high.
+//!
+//! Breaks are reported before the next swing is confirmed: an uptrend is
+//! broken as soon as price falls below the last higher low.
 
 use serde::Serialize;
 
@@ -325,12 +328,23 @@ pub struct Setup {
     pub note: String,
 }
 
+/// The trend failing before the next swing confirms it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum Break {
+    /// Price fell below the last higher low.
+    UptrendBroken,
+    /// Price rose above the last lower high.
+    DowntrendBreaking,
+}
+
 /// What to do with a stock right now, most urgent first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 pub enum Status {
     LookNow,
     GetReady,
     Uptrend,
+    /// Was in an uptrend; price is now below the last higher low.
+    Broken,
     Range,
     Downtrend,
     Thin,
@@ -342,6 +356,8 @@ pub struct View {
     pub setups: Vec<Setup>,
     /// The weekly trend is up too.
     pub weekly_star: bool,
+    pub breaking: Option<Break>,
+    pub break_note: Option<String>,
 }
 
 /// Setups for today using the live price (or the last close).
@@ -418,6 +434,32 @@ pub fn evaluate(s: &Structure, live: Option<&Live>, p: &Params, enabled: &[Signa
         }
     }
 
+    // Breaks use the leg in progress and today's range, so they show
+    // before the next swing is confirmed.
+    let low_now = match (s.leg_up, s.leg_extreme) {
+        (Some(false), Some(x)) => x.min(day_low),
+        _ => day_low,
+    };
+    let high_now = match (s.leg_up, s.leg_extreme) {
+        (Some(true), Some(x)) => x.max(price),
+        _ => price,
+    };
+    let (breaking, break_note) = match (s.trend, s.last_low, s.last_high) {
+        (Trend::Up, Some(l), _) if low_now < l => (
+            Some(Break::UptrendBroken),
+            Some(format!(
+                "Fell to {low_now:.2}, below the last higher low {l:.2}: uptrend broken. Wait for a new base."
+            )),
+        ),
+        (Trend::Down, _, Some(h)) if high_now > h => (
+            Some(Break::DowntrendBreaking),
+            Some(format!(
+                "Rose to {high_now:.2}, above the last lower high {h:.2}: downtrend breaking."
+            )),
+        ),
+        _ => (None, None),
+    };
+
     let status = if !s.liquid {
         Status::Thin
     } else if setups.iter().any(|x| x.triggered && x.plan.passes) {
@@ -429,6 +471,7 @@ pub fn evaluate(s: &Structure, live: Option<&Live>, p: &Params, enabled: &[Signa
         Status::GetReady
     } else {
         match s.trend {
+            Trend::Up if breaking.is_some() => Status::Broken,
             Trend::Up => Status::Uptrend,
             Trend::Range => Status::Range,
             Trend::Down => Status::Downtrend,
@@ -438,6 +481,8 @@ pub fn evaluate(s: &Structure, live: Option<&Live>, p: &Params, enabled: &[Signa
         status,
         setups,
         weekly_star: s.weekly_trend == Some(Trend::Up),
+        breaking,
+        break_note,
     }
 }
 
@@ -610,6 +655,53 @@ mod tests {
             .iter()
             .any(|x| x.kind == SignalKind::HigherLowEntry && x.triggered));
         assert_eq!(v.status, Status::LookNow);
+    }
+
+    #[test]
+    fn uptrend_broken_below_last_higher_low() {
+        // Uptrend (HL 115, HH 140), then a fall to 112: below the last low.
+        let mut c = legs(&[100.0, 120.0, 108.0, 130.0, 115.0, 140.0], 5);
+        c.extend(legs(&[140.0, 112.0], 7).into_iter().skip(1));
+        let bars = path(&c);
+        let p = params();
+        let s = analyze(&bars, &p).unwrap();
+        assert_eq!(s.trend, Trend::Up);
+        let v = evaluate(&s, None, &p, &SignalKind::STRUCTURE);
+        assert_eq!(v.breaking, Some(Break::UptrendBroken));
+        assert_eq!(v.status, Status::Broken);
+        assert!(v.setups.is_empty());
+        assert!(v.break_note.unwrap().contains("below the last higher low"));
+
+        // A pullback that holds above the low is not a break, until a live
+        // dip goes under it.
+        let mut c = legs(&[100.0, 120.0, 108.0, 130.0, 115.0, 140.0], 5);
+        c.extend(legs(&[140.0, 126.0], 7).into_iter().skip(1));
+        let s = analyze(&path(&c), &p).unwrap();
+        let v = evaluate(&s, None, &p, &SignalKind::STRUCTURE);
+        assert_eq!(v.breaking, None);
+        assert_ne!(v.status, Status::Broken);
+        let dip = Live {
+            price: 116.0,
+            day_low: 114.0,
+            volume: 1e6,
+            session_fraction: 0.5,
+        };
+        let v = evaluate(&s, Some(&dip), &p, &SignalKind::STRUCTURE);
+        assert_eq!(v.breaking, Some(Break::UptrendBroken));
+    }
+
+    #[test]
+    fn downtrend_breaking_above_last_lower_high() {
+        // Down (LH 121, LL 100), then a rally to 124.
+        let mut c = legs(&[140.0, 120.0, 132.0, 110.0, 121.0, 100.0], 5);
+        c.extend(legs(&[100.0, 124.0], 8).into_iter().skip(1));
+        let bars = path(&c);
+        let p = params();
+        let s = analyze(&bars, &p).unwrap();
+        assert_eq!(s.trend, Trend::Down);
+        let v = evaluate(&s, None, &p, &[]);
+        assert_eq!(v.breaking, Some(Break::DowntrendBreaking));
+        assert_eq!(v.status, Status::Downtrend);
     }
 
     #[test]

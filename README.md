@@ -65,6 +65,30 @@ on average. ⭐ means the weekly chart is in an uptrend too.
 "Look first" and filter with the chips. The stock screen shows the structure,
 the plan, the one-year track record, and swing dots on the chart.
 
+**Uptrend broken.** As soon as a stock in an uptrend trades below its last
+higher low, it is marked ⚠ Uptrend broken, before the next swing confirms
+it. An optional notification (off by default) says so once per swing. A
+downtrend rising above its last lower high shows as "Downtrend breaking".
+
+**History.** The app keeps, on the phone:
+
+- a swing log: every confirmed swing with its date, price, label and the
+  trend after it (the first run reconstructs the past year from CSE prices);
+- one structure row per trading day (trend, weekly trend, marker), shown on
+  the stock screen as trend periods, e.g. "⚠ Uptrend broken 13–21 Oct";
+- every alert, with its result: target or stop hit first (a day touching
+  both counts as stopped), best and worst move, and the return after 5, 10
+  and 20 trading days, after fees. 🔔 → Alert results summarises each signal.
+
+Everything can be exported as CSV (🔔 → Export history).
+
+**Prices before the open.** The CSE serves empty lists for about 30 minutes
+before the session. The app keeps a copy of the whole market view (every
+quote, the indices and the top lists), saved every 5 minutes in the session
+and once after the close. On start it shows that copy, labelled "saved
+prices", until the CSE serves the new session's prices. Paper orders never
+fill on saved prices.
+
 The earlier indicator signals (breakout, pullback, trend turn, oversold
 bounce, opening range, volume spike) are still available under 🔔 → Other
 indicators, off by default. You can also add one-off price levels.

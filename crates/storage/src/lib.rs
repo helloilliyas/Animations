@@ -33,6 +33,9 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+mod history;
+pub use history::{AlertRow, StructureDay, SwingRow};
+
 /// One stored price point.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PricePoint {
@@ -53,7 +56,7 @@ pub struct Store {
 }
 
 /// Schema migrations; entry N upgrades `user_version` N to N + 1.
-const MIGRATIONS: &[&str] = &[V1, V2, V3];
+const MIGRATIONS: &[&str] = &[V1, V2, V3, history::V4];
 
 const V1: &str = "
 CREATE TABLE quote_snapshot (

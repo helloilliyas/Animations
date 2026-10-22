@@ -773,3 +773,146 @@ async fn closing_check_fires_structure_setups_after_the_close() {
     h.set_time(lk_on(17, 10, 0));
     assert_eq!(h.svc.run_check().await.unwrap(), 0);
 }
+
+#[tokio::test]
+async fn saved_prices_bridge_the_gap_before_the_open() {
+    let db = std::env::temp_dir().join(format!("cse-copy-{}.sqlite", std::process::id()));
+    let _ = std::fs::remove_file(&db);
+    let open = |routes: HashMap<&'static str, String>, at: DateTime<Utc>| {
+        let db = db.clone();
+        async move {
+            let base = stub(routes).await;
+            AppService::with(
+                Store::open(&db).unwrap(),
+                CseClient::new(base).with_retries(0),
+                Arc::new(move || at),
+            )
+            .unwrap()
+        }
+    };
+
+    // Friday after the close: the day's prices are copied.
+    let svc = open(routes("Market Closed"), lk_on(16, 15, 0)).await;
+    svc.dispatch("refresh", Value::Null).await.unwrap();
+    let before = svc.dispatch("market", Value::Null).await.unwrap();
+    assert!(before["saved_copy"].is_null());
+    drop(svc);
+
+    // Monday 09:10, a fresh start: the CSE lists are still empty.
+    let mut empty = routes("Pre Trading");
+    empty.insert("tradeSummary", r#"{"reqTradeSummery":[]}"#.into());
+    empty.insert("topGainers", "[]".into());
+    empty.insert("topLooses", "[]".into());
+    empty.insert("mostActiveTrades", "[]".into());
+    let svc = open(empty, lk_on(19, 9, 10)).await;
+    svc.dispatch("refresh", Value::Null).await.unwrap();
+    let m = svc.dispatch("market", Value::Null).await.unwrap();
+    assert!(m["saved_copy"].is_string(), "{m}");
+    assert_eq!(m["securities"], before["securities"]);
+    assert_eq!(m["gainers"], before["gainers"]);
+    assert_eq!(m["aspi"]["value"], before["aspi"]["value"]);
+    let quotes = svc.dispatch("quotes", Value::Null).await.unwrap();
+    assert!(quotes.as_array().unwrap().len() > 200);
+    drop(svc);
+
+    // 09:31: live prices replace the copy.
+    let svc = open(routes("Market Open"), lk_on(19, 9, 31)).await;
+    svc.dispatch("refresh", Value::Null).await.unwrap();
+    let m = svc.dispatch("market", Value::Null).await.unwrap();
+    assert!(m["saved_copy"].is_null());
+    let _ = std::fs::remove_file(&db);
+}
+
+#[tokio::test]
+async fn structure_history_alert_results_and_export() {
+    let mut r = routes("Market Open");
+    chart_routes(&mut r);
+    r.insert("companyChartDataByStock", uptrend_chart());
+    r.insert("tradeSummary", price_jkh(126.0, 124.0));
+    let h = Harness::with_routes(r, lk_on(16, 11, 0)).await;
+    let wl = h
+        .call("create_watch_list", json!({"name": "Favourites"}))
+        .await;
+    h.call(
+        "add_to_watch_list",
+        json!({"id": wl["id"], "symbol": "JKH.N0000"}),
+    )
+    .await;
+    assert_eq!(h.svc.run_check().await.unwrap(), 1);
+
+    let hist = h
+        .call("structure_history", json!({"symbol": "JKH.N0000"}))
+        .await;
+    let swings = hist["swings"].as_array().unwrap();
+    assert!(swings.len() >= 5, "{hist}");
+    // Newest first, reconstructed from the downloaded year.
+    assert_eq!(swings[0]["label"], "HH");
+    assert_eq!(swings[0]["trend"], "Up");
+    assert!(swings.iter().all(|w| w["backfilled"] == true));
+    assert_eq!(hist["periods"][0]["state"], "Up");
+    assert!(hist["days"].as_u64().unwrap() > 50);
+    let alert = &hist["alerts"][0];
+    assert!(alert["kind"]
+        .as_str()
+        .unwrap()
+        .starts_with("Higher low entry"));
+    assert_eq!(alert["outcome"]["status"], "open");
+    assert!(alert["entry"].as_f64().unwrap() > 124.0);
+
+    let results = h.call("alert_results", Value::Null).await;
+    let s = &results["summary"]["Higher low entry"];
+    assert_eq!(s["alerts"], 1, "{results}");
+    assert_eq!(s["open"], 1);
+
+    let csv = h.call("export_history", Value::Null).await;
+    let text = csv["csv"].as_str().unwrap();
+    assert!(text.starts_with("# Swings\n"));
+    assert!(text.contains("\n# Daily structure\n") && text.contains("\n# Alerts\n"));
+    assert!(text.contains("JKH.N0000,2026-"));
+
+    // The next day's check adds no duplicate swings.
+    h.set_time(lk_on(19, 11, 0));
+    h.svc.run_check().await.unwrap();
+    let again = h
+        .call("structure_history", json!({"symbol": "JKH.N0000"}))
+        .await;
+    assert_eq!(again["swings"].as_array().unwrap().len(), swings.len());
+}
+
+#[tokio::test]
+async fn uptrend_broken_marker_and_optional_notification() {
+    let mut r = routes("Market Open");
+    chart_routes(&mut r);
+    r.insert("companyChartDataByStock", uptrend_chart());
+    // The last higher low is about 104.6; today's low goes under it.
+    r.insert("tradeSummary", price_jkh(103.0, 102.0));
+    let h = Harness::with_routes(r, lk_on(16, 11, 0)).await;
+    let wl = h
+        .call("create_watch_list", json!({"name": "Favourites"}))
+        .await;
+    h.call(
+        "add_to_watch_list",
+        json!({"id": wl["id"], "symbol": "JKH.N0000"}),
+    )
+    .await;
+    // Off by default: a marker, no notification.
+    assert_eq!(h.svc.run_check().await.unwrap(), 0);
+    let m = h.call("favourite_markers", Value::Null).await;
+    let jkh = &m["markers"]["JKH.N0000"];
+    assert_eq!(jkh["status"], "broken", "{m}");
+    assert_eq!(jkh["label"], "Uptrend broken");
+
+    h.call("update_alert_config", json!({"notify_broken": true}))
+        .await;
+    h.set_time(lk_on(16, 11, 30));
+    assert_eq!(h.svc.run_check().await.unwrap(), 1);
+    let view = h.call("alerts", Value::Null).await;
+    assert_eq!(view["history"][0]["kind"], "Uptrend broken");
+    assert!(view["history"][0]["message"]
+        .as_str()
+        .unwrap()
+        .contains("below the last higher low"));
+    // Once per swing.
+    h.set_time(lk_on(16, 12, 0));
+    assert_eq!(h.svc.run_check().await.unwrap(), 0);
+}

@@ -96,7 +96,14 @@ function renderStatus() {
   const m = state.market;
   const el = $("#status");
   el.className = "status " + (m ? m.phase.toLowerCase() : "");
-  $("#status-text").textContent = m ? (m.status || m.phase) : "Connecting…";
+  $("#status-text").textContent = m ? (m.status || m.phase) + (m.saved_copy ? " · saved prices" : "") : "Connecting…";
+}
+// Shown while prices come from the copy saved by an earlier run.
+function savedCopyBanner() {
+  const m = state.market;
+  if (!m || !m.saved_copy) return "";
+  const when = new Date(m.saved_copy).toLocaleString("en-GB", { timeZone: "Asia/Colombo", day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" });
+  return `<div class="banner">Prices saved ${esc(when)} — live prices replace them once the CSE starts the session.</div>`;
 }
 
 // ---------- Market ----------
@@ -137,7 +144,7 @@ function renderMarket() {
     gainers: m.gainers, losers: m.losers, turnover: m.top_turnover,
     volume: m.top_volume, active: m.most_active,
   };
-  return `
+  return `${savedCopyBanner()}
     ${m.errors.length ? `<div class="banner">Some data could not be loaded: ${esc(m.errors.join("; "))}</div>` : ""}
     <div class="cards">${indexCard("ASPI", m.aspi)}${indexCard("S&amp;P SL20", m.snp_sl20)}</div>
     <div class="card" style="margin-top:10px">
@@ -176,6 +183,7 @@ const MARK = {
   look_now: ["●", "Look now", "mk-look"],
   get_ready: ["◐", "Get ready", "mk-ready"],
   uptrend: ["↗", "Uptrend", "mk-up"],
+  broken: ["⚠", "Uptrend broken", "mk-broken"],
   range: ["↔", "Range", "mk-range"],
   downtrend: ["↘", "Downtrend", "mk-down"],
   thin: ["·", "Thinly traded", "mk-thin"],
@@ -188,7 +196,7 @@ const markOf = (sym) => markers.markers[sym];
 function markBadge(m) {
   if (!m) return "";
   let [icon, text, cls] = MARK[m.status] || MARK.pending;
-  const full = m.status === "look_now" || m.status === "get_ready";
+  const full = m.status === "look_now" || m.status === "get_ready" || m.status === "broken";
   // Thin stocks get no alerts but still show their trend.
   if (m.status === "thin") icon = ({ Up: "↗", Down: "↘", Range: "↔" }[m.trend] || "") + " thin";
   return `<span class="mk ${cls}" title="${text}">${icon}${full ? " " + text : ""}${m.star ? " ⭐" : ""}</span>`;
@@ -212,7 +220,8 @@ const MARK_FILTERS = {
   all: ["All", () => true],
   look_now: ["Look now", (m) => m && m.status === "look_now"],
   get_ready: ["Get ready", (m) => m && m.status === "get_ready"],
-  uptrend: ["Uptrend", (m) => m && m.trend === "Up"],
+  uptrend: ["Uptrend", (m) => m && m.trend === "Up" && m.status !== "broken"],
+  broken: ["Broken", (m) => m && m.status === "broken"],
 };
 const BG_TEXT = { off: "Background checks off", 60: "Checks every hour", 30: "Checks every 30 min", 15: "Checks every 15 min", live: "Live background checks" };
 async function renderWatch() {
@@ -242,7 +251,7 @@ async function renderWatch() {
   const opts = [`<option value="all">Full watch</option>`]
     .concat(watchLists.map((w) => `<option value="${w.id}" ${String(w.id) === String(state.watch.list) ? "selected" : ""}>★ ${esc(w.name)}</option>`))
     .join("");
-  return `
+  return `${savedCopyBanner()}
     <div class="toolbar">
       <select id="wl-select">${opts}</select>
       <button class="btn ghost small" id="wl-new">+ List</button>
@@ -257,7 +266,8 @@ async function renderWatch() {
     </div>${summary}
     <div class="list">${list.length ? list.slice(0, 400).map((q) => {
       const m = markOf(q.symbol);
-      const why = m && m.label ? `<div class="sub ${MARK[m.status][2]}">${esc(m.label)}${m.detail ? " · " + esc(m.detail) : ""}</div>` : "";
+      // The badge already names a broken trend; the line adds the level.
+      const why = m && m.label ? `<div class="sub ${MARK[m.status][2]}">${m.status === "broken" ? esc(m.detail) : esc(m.label) + (m.detail ? " · " + esc(m.detail) : "")}</div>` : "";
       return `
       <div class="row" data-symbol="${esc(q.symbol)}">
         <div><div class="sym">${esc(q.symbol)} ${markBadge(m)}</div><div class="sub">${esc(q.name)}</div>${why}</div>
@@ -439,6 +449,7 @@ async function openQuote(symbol) {
     </div>
     <div class="chart-box" id="q-chart"></div>
     ${fav ? structureCard(fav, alertsView) : ""}
+    ${fav ? `<details class="card hist" id="q-history"><summary><b>History</b> <span class="small muted">swings, trend periods and alerts</span></summary><div class="hist-body"><div class="small muted">Loading…</div></div></details>` : ""}
     <div class="card" style="margin-top:12px"><div class="kv">
       ${field("Open", fmt(q.open))}${field("High", fmt(q.high))}${field("Low", fmt(q.low))}
       ${field("Prev. close", fmt(q.prev_close))}${field("Volume", fmtInt(q.share_volume))}
@@ -455,6 +466,8 @@ async function openQuote(symbol) {
     </div>
     <div class="btn-row"><button class="btn ghost" id="q-tv">📈 TradingView chart &amp; tools</button></div>`, (root) => {
     mountChart($("#q-chart", root), symbol, (fav && fav.structure && fav.structure.swings) || []);
+    const hist = $("#q-history", root);
+    if (hist) hist.ontoggle = () => { if (hist.open && !hist.dataset.loaded) { hist.dataset.loaded = "1"; loadHistory(hist, symbol); } };
     $("#q-buy", root).onclick = () => { closeSheet(); goTicket(symbol, "Buy", q.last); };
     $("#q-sell", root).onclick = () => { closeSheet(); goTicket(symbol, "Sell", q.last); };
     $("#q-tv", root).onclick = () => { closeSheet(); openTradingView(symbol); };
@@ -879,6 +892,44 @@ function distance(price, level) {
   return `<span class="muted small">(${d >= 0 ? "+" : ""}${fmt(d, 1)}% away)</span>`;
 }
 const TREND = { Up: ["↗ Uptrend", "up"], Down: ["↘ Downtrend", "down"], Range: ["↔ Range", "flat"] };
+const PERIOD = { Up: ["↗ Uptrend", "up"], Down: ["↘ Downtrend", "down"], Range: ["↔ Range", "flat"], Broken: ["⚠ Uptrend broken", "mk-broken"] };
+const fmtDay = (d) => new Date(d + "T00:00:00").toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "2-digit" });
+const sgn = (x, dp = 1) => (x == null ? "—" : (x > 0 ? "+" : "") + fmt(x, dp) + "%");
+// One alert with how it turned out.
+function outcomeLine(a) {
+  const o = a.outcome || {};
+  const tag = { target: `<span class="up">✅ Target hit ${fmtDay(o.resolved_day)} (${sgn(o.result_pct)})</span>`,
+    stop: `<span class="down">❌ Stopped ${fmtDay(o.resolved_day)} (${sgn(o.result_pct)})</span>`,
+    open: `<span class="mk-ready">⏳ Open</span>` }[o.status] || "";
+  const after = [5, 10, 20].filter((h) => o.after && o.after[h] != null).map((h) => `${h}d ${sgn(o.after[h])}`).join(" · ");
+  const range = o.best_pct != null ? `best ${sgn(o.best_pct)} · worst ${sgn(o.worst_pct)}` : "no trading days since";
+  return `<div class="row" data-symbol="${esc(a.symbol)}" style="cursor:pointer">
+    <div><b>${esc(a.symbol.replace(/\.N0000$/, ""))}</b> <span class="small">${esc(a.kind)}</span>
+      <div class="sub">${timeStr(a.at)} at ${fmt(a.price)}${a.entry != null ? ` · entry ${fmt(a.entry)} · stop ${fmt(a.stop)} · target ${fmt(a.target)}` : ""}</div>
+      <div class="small">${tag} ${tag ? "· " : ""}<span class="muted">${range}${after ? " · " + after : ""}</span></div></div></div>`;
+}
+async function loadHistory(el, symbol) {
+  const body = $(".hist-body", el);
+  try {
+    const h = await call("structure_history", { symbol });
+    const periods = h.periods.slice(0, 20).map((p) => {
+      const [label, cls] = PERIOD[p.state] || [p.state, ""];
+      const chg = p.close_from ? (p.close_to / p.close_from - 1) * 100 : null;
+      return `<div class="hist-row"><span class="${cls}">${label}</span>
+        <span class="muted small">${fmtDay(p.from)}${p.from !== p.to ? " – " + fmtDay(p.to) : ""} · ${p.days} day${p.days > 1 ? "s" : ""} · ${fmt(p.close_from)} → ${fmt(p.close_to)} (${sgn(chg)})</span></div>`;
+    }).join("");
+    const swings = h.swings.slice(0, 30).map((w) => {
+      const cls = w.label === "HH" || w.label === "HL" ? "up" : w.label ? "down" : "muted";
+      return `<div class="hist-row"><span><b class="${cls}">${w.label || (w.kind === "High" ? "H" : "L")}</b> ${fmt(w.price)}</span>
+        <span class="muted small">${fmtDay(w.day)} · trend ${w.trend}${w.backfilled ? "" : " · seen live"}</span></div>`;
+    }).join("");
+    body.innerHTML = `
+      <h3 class="hist-h">Trend periods</h3>${periods || `<div class="small muted">Recorded from the next check.</div>`}
+      <h3 class="hist-h">Swings</h3>${swings || `<div class="small muted">No confirmed swings yet.</div>`}
+      <h3 class="hist-h">Alerts</h3>${h.alerts.length ? `<div class="list">${h.alerts.map(outcomeLine).join("")}</div>` : `<div class="small muted">No alerts for this stock yet.</div>`}
+      <p class="small muted">${h.since ? `Kept since ${fmtDay(h.since)} (${h.days} trading days). Older days were reconstructed from CSE prices; new ones are added each day.` : ""}</p>`;
+  } catch (e) { body.innerHTML = `<div class="small muted">${esc(e.message || e)}</div>`; }
+}
 function swingChain(st) {
   return st.swings.slice(-6).map((w) => {
     const cls = w.label === "HH" || w.label === "HL" ? "up" : w.label ? "down" : "muted";
@@ -903,7 +954,7 @@ function structureCard(f, v) {
   if (!st) {
     return `<div class="card struct"><b>Market structure</b><div class="small muted">${f.pending ? "Checking… (needs the next data refresh)" : esc(f.error || "Not enough history yet (needs 30 trading days)")}</div></div>`;
   }
-  const [tl, tc] = TREND[st.trend];
+  const [tl, tc] = sv && sv.breaking === "UptrendBroken" ? ["⚠ Uptrend broken", "mk-broken"] : TREND[st.trend];
   const m = markOf(f.symbol);
   const recs = (f.structure_records || []).filter((r) => r.fired);
   return `<div class="card struct">
@@ -911,8 +962,9 @@ function structureCard(f, v) {
     <div class="small"><span class="${tc}">${tl}</span> · weekly ${st.weekly_trend ? `<span class="${TREND[st.weekly_trend][1]}">${st.weekly_trend}</span>` : "—"}
       · swings of ${fmt(st.threshold_pct, 1)}%+${st.liquid ? "" : ` · <span class="muted">thinly traded (Rs. ${fmtVol(st.avg_turnover)}/day) — no alerts</span>`}</div>
     <div class="small swings">${swingChain(st)}</div>
+    ${sv && sv.break_note ? `<div class="banner ${sv.breaking === "UptrendBroken" ? "warn" : ""}">${sv.breaking === "UptrendBroken" ? "⚠ " : "↗ "}${esc(sv.break_note)}</div>` : ""}
     ${sv && sv.setups.length ? sv.setups.map((x) => setupBlock(x, labels)).join("")
-      : `<div class="small muted" style="margin-top:6px">${st.trend === "Up"
+      : sv && sv.breaking ? "" : `<div class="small muted" style="margin-top:6px">${st.trend === "Up"
         ? "Uptrend, no entry yet: waiting for a pullback that holds above the last low, or a break of the last high."
         : st.trend === "Down" ? "Downtrend: lower highs and lower lows. Nothing to do until it breaks the last high."
         : "No clear trend: highs and lows are mixed."}</div>`}
@@ -921,7 +973,7 @@ function structureCard(f, v) {
       : `<span class="muted">No structure signals on this stock in the past year.</span>`}</div>
   </div>`;
 }
-const statusKey = (s) => ({ LookNow: "look_now", GetReady: "get_ready", Uptrend: "uptrend", Range: "range", Downtrend: "downtrend", Thin: "thin" })[s] || "pending";
+const statusKey = (s) => ({ LookNow: "look_now", GetReady: "get_ready", Uptrend: "uptrend", Broken: "broken", Range: "range", Downtrend: "downtrend", Thin: "thin" })[s] || "pending";
 function favouriteCard(f, v) {
   const L = f.levels, recs = {};
   (f.records || []).forEach((r) => (recs[r.kind] = r));
@@ -966,7 +1018,7 @@ function favouriteCard(f, v) {
 }
 
 async function renderAlerts() {
-  let v = await call("alerts");
+  let [v, results] = await Promise.all([call("alerts"), call("alert_results").catch(() => null)]);
   const br = bgBridge();
   if (br) {
     const running = await br.isRunning();
@@ -1000,6 +1052,8 @@ async function renderAlerts() {
         `<button data-bg="${k}" class="${v.background_mode === k ? "active" : ""}" ${bridge ? "" : "disabled"}>${label}</button>`).join("")}</div>
       <label class="switch-row"><span><b>Get ready notifications</b><br><span class="small muted">Also notify when a stock is within ${fmt(P.near_pct, 1)}% of a trigger (always marked in the Watch list)</span></span>
         <input type="checkbox" id="al-ready" ${v.notify_get_ready ? "checked" : ""}></label>
+      <label class="switch-row"><span><b>Uptrend broken notifications</b><br><span class="small muted">Notify when a favourite falls below its last higher low (always marked ⚠ in the Watch list)</span></span>
+        <input type="checkbox" id="al-broken" ${v.notify_broken ? "checked" : ""}></label>
     </div>
     <h2>Market structure</h2>
     <div class="chips">${structChips}</div>
@@ -1025,6 +1079,8 @@ async function renderAlerts() {
         <div class="right small ${c.active ? "up" : "muted"}">${c.active ? "Active" : "Triggered"}</div>
         <button class="btn small ghost" data-delcustom="${c.id}" aria-label="Delete">✕</button></div>`).join("")
       : `<div class="empty">None. Use “+ My own price alert” on a favourite.</div>`}</div>
+    <h2>Alert results</h2>
+    ${resultsSection(results)}
     <h2>Alert history</h2>
     <div class="list">${v.history.length ? v.history.map((a) => `
       <div class="row" data-symbol="${esc(a.symbol)}"><div><b>${esc(a.symbol)}</b> <span class="small">${esc(a.kind)}</span>
@@ -1033,6 +1089,17 @@ async function renderAlerts() {
       : `<div class="empty">No alerts yet. Signals are checked during market hours.</div>`}</div>
     ${v.history.length ? `<div class="btn-row"><button class="btn small ghost" id="al-clear">Clear history</button></div>` : ""}
     <p class="muted small">Signals are prompts to look at a stock, not buy recommendations. Higher low entry and Uptrend confirmed fire once per swing; “Downtrend broken” is riskier and off by default. Track records show how each signal did on that stock over the past year, after ~${fmt(v.params.round_trip_fee_pct)}% buy+sell fees.</p>`;
+}
+function resultsSection(r) {
+  if (!r) return `<div class="card empty">Results unavailable.</div>`;
+  const sum = Object.entries(r.summary).map(([k, x]) => `<div class="card result-card">
+      <b>${esc(k)}</b><div class="small">${x.alerts} alert${x.alerts > 1 ? "s" : ""} ·
+      <span class="up">${x.target} target</span> · <span class="down">${x.stop} stopped</span> · <span class="mk-ready">${x.open} open</span></div>
+      <div class="small muted">Average after 10 days: ${sgn(x.avg_10d_pct)} (after ~${fmt(r.fee_pct)}% fees)</div></div>`).join("");
+  const list = r.alerts.slice(0, 50).map(outcomeLine).join("");
+  return `${sum || `<div class="card empty small">Results appear here after your first market structure alert.</div>`}
+    ${list ? `<div class="list" style="margin-top:8px">${list}</div>` : ""}
+    <div class="btn-row"><button class="btn small ghost" id="al-export">Export history (CSV)</button></div>`;
 }
 function mountAlerts(root) {
   $("#al-enabled", root).onchange = (e) => attempt(() => call("update_alert_config", { enabled: e.target.checked }));
@@ -1046,6 +1113,19 @@ function mountAlerts(root) {
     render();
   }));
   $("#al-ready", root).onchange = (e) => attempt(() => call("update_alert_config", { notify_get_ready: e.target.checked }));
+  $("#al-broken", root).onchange = (e) => attempt(() => call("update_alert_config", { notify_broken: e.target.checked }));
+  const exp = $("#al-export", root);
+  if (exp) exp.onclick = async () => {
+    const r = await attempt(() => call("export_history"));
+    openSheet(`<div class="sheet-head"><h3>Export history</h3><button class="icon-btn" data-close>✕</button></div>
+      <p class="small muted">${r.swings} swings, ${r.days} daily rows and every alert with its result. Copy and paste into a spreadsheet.</p>
+      <textarea readonly id="csv-out">${esc(r.csv)}</textarea>
+      <div class="btn-row"><button class="btn primary" id="csv-copy">Copy</button></div>`, (s) => {
+      $("#csv-copy", s).onclick = async () => {
+        try { await navigator.clipboard.writeText(r.csv); toast("Copied"); } catch { $("#csv-out", s).select(); }
+      };
+    });
+  };
   $("#p-save", root).onclick = async () => {
     const v = await call("alerts");
     const val = (id) => num($(id, root).value);
