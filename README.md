@@ -15,7 +15,7 @@ See [`docs/atrad-spec.md`](docs/atrad-spec.md) for the feature spec.
 | `crates/cse-client` | Async client for CSE public data feeds, plus the `cse-probe` diagnostic tool |
 | `crates/engine` (`cse-engine`) | Paper trading: limit/market orders, Day or N-day TIF, queuing while closed, amend/cancel, fills, cash and buying power, portfolio with average cost, B.E.S, realised/unrealised P&L |
 | `crates/storage` (`cse-storage`) | SQLite: price and index snapshots for charts, watch lists, saved app state (paper account) |
-| `crates/signals` (`cse-signals`) | Alert signals: breakout, pullback, trend turn, oversold bounce (daily); opening-range breakout, volume spike (15-min); filters and one-year track records |
+| `crates/signals` (`cse-signals`) | Market structure (zigzag swings, trend, higher-low and breakout setups with trade plans) plus indicator signals; filters and one-year track records |
 | `crates/service` (`cse-service`) | App backend: market data cache and poller, paper engine, real portfolio, alerts, JSON command API |
 | `crates/dev-server` | Runs the app in a desktop browser at http://127.0.0.1:8787 |
 | `app/ui` | Mobile UI (HTML/CSS/JS): Market, Watch, Quote, Buy/Sell, Orders, Portfolio, Settings |
@@ -40,21 +40,47 @@ To build the Android APK, follow [`docs/android-build.md`](docs/android-build.md
   reserve shares. No short selling.
 - A market buy is rejected if the price moved so far that cash runs short.
 
-## Price alerts
+## Market structure alerts
 
-Tap 🔔 to see alert levels for every stock in your watch lists. Each level has
-a plain-English reason and that signal's one-year track record on the stock
-(share of signals that beat the ~2.24% round-trip fees 10 trading days later).
-Signals are skipped for thinly traded stocks; intraday signals are skipped when
-a stock's typical daily move is smaller than the fees. You can switch each
-signal off, add your own one-off price levels, and see the alert history.
+Every stock in your watch lists is checked for **market structure**: price
+swings of at least max(5%, 2× the stock's typical daily range) are marked as
+higher highs (HH), higher lows (HL), lower highs (LH) and lower lows (LL).
+Higher highs plus higher lows make an uptrend.
 
-**Background mode** (Android, off by default) keeps checking prices during
-market hours when the app is closed. It runs as a foreground service with a
-permanent notification and a Stop button, holds a CPU wake lock only from
-09:25 to 14:40 on weekdays, and turns alerts written by the Rust service into
-notifications. Some phone brands stop background apps aggressively: allow
-CSE Trader to run without battery restrictions when Android asks.
+| Signal | Fires when | Default |
+| --- | --- | --- |
+| Higher low entry | In an uptrend, a pullback holds above the last low and bounces half a swing | on |
+| Uptrend confirmed | After a higher low, price clears the last high by 1% | on |
+| Downtrend broken | In a downtrend, price clears the last lower high | off |
+
+Each signal comes with a plan: entry, stop just below the swing low, target
+at the last high (or the prior advance for breakouts), and fires only when
+reward/risk is at least 2× and the target covers the ~2.24% round-trip fees.
+It fires once per swing, and only for stocks trading at least Rs. 1M a day
+on average. ⭐ means the weekly chart is in an uptrend too.
+
+**Watch list markers** show which favourites to look at, next to the name:
+● Look now (a setup triggered), ◐ Get ready (within 2% of a trigger),
+↗ uptrend, ↔ range, ↘ downtrend, and "thin" for thinly traded stocks. Sort by
+"Look first" and filter with the chips. The stock screen shows the structure,
+the plan, the one-year track record, and swing dots on the chart.
+
+The earlier indicator signals (breakout, pullback, trend turn, oversold
+bounce, opening range, volume spike) are still available under 🔔 → Other
+indicators, off by default. You can also add one-off price levels.
+
+**Background checks** (Android) when the app is closed:
+
+- **Every 15, 30 (default) or 60 minutes** during trading hours (09:30–14:30,
+  weekdays), plus one check after the close on the closing prices. Uses
+  Android WorkManager; no permanent notification.
+- **Live** keeps checking every few seconds as a foreground service with a
+  permanent notification and a Stop button.
+
+Each check sends one notification: the setup in full for one stock, or
+"🔔 N stocks to look at" for several. Some phone brands stop background work
+aggressively: allow CSE Trader to run without battery restrictions when
+Android asks.
 
 Signals are prompts to look at a stock, not buy recommendations.
 

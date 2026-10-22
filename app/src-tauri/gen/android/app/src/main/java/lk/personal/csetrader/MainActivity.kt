@@ -46,6 +46,24 @@ class MainActivity : TauriActivity() {
         "isRunning" -> AlertService.running
         // False after the user tapped Stop on the notification.
         "wanted" -> getSharedPreferences(AlertService.PREFS, MODE_PRIVATE).getBoolean("enabled", false)
+        // Timed checks: minutes 15, 30 or 60; 0 turns them off.
+        "schedule" -> {
+          val minutes = m.optInt("minutes")
+          Outbox.setPath(this, m.optString("path"))
+          if (minutes > 0) {
+            requestNotificationPermission()
+            requestBatteryExemption()
+          }
+          CheckWorker.schedule(this, minutes)
+          true
+        }
+        // Posts notifications for new outbox lines (alerts found while the app is open).
+        "drain" -> {
+          requestNotificationPermission()
+          Outbox.setPath(this, m.optString("path"))
+          Outbox.drain(this)
+          true
+        }
         "notify" -> {
           requestNotificationPermission()
           Notifier.alert(this, 10_000 + m.optInt("nid"), m.optString("title"), m.optString("body"))

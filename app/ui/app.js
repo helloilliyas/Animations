@@ -835,10 +835,13 @@ const bgBridge = (() => {
       isRunning: () => send("isRunning"),
       wanted: () => send("wanted"),
       notify: (id, title, body) => send("notify", { nid: Number(id), title, body }),
-      schedule: (minutes) => send("schedule", { minutes }),
+      schedule: async (minutes) => send("schedule", { minutes, path: await outboxPath() }),
+      drain: async () => send("drain", { path: await outboxPath() }),
     });
   };
 })();
+let outboxFile = null;
+async function outboxPath() { return outboxFile ??= (await call("outbox_path")) || ""; }
 let lastAlertId = prefGet("lastAlertId", null);
 let unseenAlerts = prefGet("unseenAlerts", 0);
 function setBellDot() { $("#open-alerts").classList.toggle("has-new", unseenAlerts > 0); }
@@ -850,13 +853,12 @@ async function checkAlerts() {
   for (const a of r.alerts) {
     const title = `${a.symbol.replace(/\.N0000$/, "")} · ${a.kind}`;
     toast(`🔔 ${title}: ${a.message}`);
-    if (bridge) {
-      // The background service posts its own notifications while running.
-      if (!(await bridge.isRunning())) await bridge.notify(a.id, title, a.message);
-    } else if ("Notification" in window && Notification.permission === "granted") {
+    if (!bridge && "Notification" in window && Notification.permission === "granted") {
       try { new Notification(title, { body: a.message }); } catch { /* ignore */ }
     }
   }
+  // On Android every notification comes from the outbox (one per check).
+  if (bridge && r.alerts.length) await bridge.drain();
   if (r.alerts.length) {
     lastAlertId = r.latest_id; prefSet("lastAlertId", lastAlertId);
     if (state.tab !== "alerts") { unseenAlerts += r.alerts.length; prefSet("unseenAlerts", unseenAlerts); }
@@ -1097,7 +1099,7 @@ async function applyBackground(mode) {
   if (!br) throw new Error("Background checks need the Android app");
   if (mode === "live") {
     await br.schedule(0);
-    await br.start((await call("outbox_path")) || "");
+    await br.start(await outboxPath());
   } else {
     await br.stop();
     await br.schedule(mode === "off" ? 0 : Number(mode));

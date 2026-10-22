@@ -751,3 +751,25 @@ async fn old_alert_settings_migrate_to_structure() {
     assert_eq!(view["signals"]["DowntrendBroken"], false);
     assert_eq!(view["background_mode"], "live");
 }
+
+#[tokio::test]
+async fn closing_check_fires_structure_setups_after_the_close() {
+    let mut r = routes("Market Closed");
+    chart_routes(&mut r);
+    r.insert("companyChartDataByStock", uptrend_chart());
+    r.insert("tradeSummary", price_jkh(126.0, 124.0));
+    // Friday 16 Oct, 14:45: after the close on a trading day.
+    let h = Harness::with_routes(r, lk_on(16, 14, 45)).await;
+    let wl = h
+        .call("create_watch_list", json!({"name": "Favourites"}))
+        .await;
+    h.call(
+        "add_to_watch_list",
+        json!({"id": wl["id"], "symbol": "JKH.N0000"}),
+    )
+    .await;
+    assert_eq!(h.svc.run_check().await.unwrap(), 1);
+    // Saturday: nothing.
+    h.set_time(lk_on(17, 10, 0));
+    assert_eq!(h.svc.run_check().await.unwrap(), 0);
+}

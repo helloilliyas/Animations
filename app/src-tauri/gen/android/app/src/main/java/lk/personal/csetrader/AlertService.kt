@@ -15,9 +15,6 @@ import android.os.Looper
 import android.os.PowerManager
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
-import org.json.JSONObject
-import java.io.File
-import java.io.RandomAccessFile
 import java.util.Calendar
 import java.util.TimeZone
 
@@ -116,7 +113,7 @@ class AlertService : Service() {
 
     private val tick = object : Runnable {
         override fun run() {
-            readOutbox()
+            Outbox.drain(this@AlertService)
             manageWakeLock()
             handler.postDelayed(this, TICK_MS)
         }
@@ -130,46 +127,16 @@ class AlertService : Service() {
             shutdown()
             return START_NOT_STICKY
         }
-        intent?.getStringExtra(EXTRA_OUTBOX)?.takeIf { it.isNotEmpty() }?.let {
-            prefs.edit().putString("outbox", it).apply()
-        }
+        intent?.getStringExtra(EXTRA_OUTBOX)?.let { Outbox.setPath(this, it) }
         val type = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
             ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE else 0
         ServiceCompat.startForeground(this, NOTIFICATION_ID, Notifier.watching(this), type)
         prefs.edit().putBoolean("enabled", true).apply()
         if (!running) {
             running = true
-            // Start from the end of the outbox: never replay old alerts.
-            outboxFile()?.let { prefs.edit().putLong("offset", it.length()).apply() }
             handler.post(tick)
         }
         return START_STICKY
-    }
-
-    private fun outboxFile(): File? = prefs.getString("outbox", null)?.let { File(it) }
-
-    private fun readOutbox() {
-        val f = outboxFile() ?: return
-        if (!f.exists()) return
-        var offset = prefs.getLong("offset", 0L)
-        if (f.length() < offset) offset = 0L // file was replaced
-        if (f.length() == offset) return
-        try {
-            RandomAccessFile(f, "r").use { raf ->
-                raf.seek(offset)
-                while (true) {
-                    val raw = raf.readLine() ?: break
-                    val line = String(raw.toByteArray(Charsets.ISO_8859_1), Charsets.UTF_8)
-                    if (line.isBlank()) continue
-                    val o = JSONObject(line)
-                    Notifier.alert(this, 10_000 + o.optInt("id"), o.optString("title"), o.optString("body"))
-                }
-                offset = raf.filePointer
-            }
-        } catch (_: Exception) {
-            offset = f.length()
-        }
-        prefs.edit().putLong("offset", offset).apply()
     }
 
     /** CPU stays awake 09:25–14:40 Sri Lanka time on weekdays only. */

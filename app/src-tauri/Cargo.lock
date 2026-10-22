@@ -728,6 +728,7 @@ name = "cse-trader"
 version = "0.1.0"
 dependencies = [
  "cse-service",
+ "jni",
  "serde_json",
  "tauri",
  "tauri-build",

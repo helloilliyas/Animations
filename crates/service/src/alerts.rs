@@ -31,6 +31,8 @@ const BOOK_VERSION: u32 = 2;
 const HISTORY_LIMIT: usize = 200;
 /// Daily histories fetched per refresh, to spread requests out.
 const SYNCS_PER_REFRESH: usize = 10;
+/// How long after the close the closing check of structure setups runs.
+const CLOSING_CHECK_HOURS: i64 = 3;
 /// Minutes between intraday trade fetches per stock.
 const INTRADAY_EVERY_MIN: i64 = 5;
 
@@ -300,8 +302,9 @@ impl AppService {
             self.state.write().unwrap().analysis.insert(sym, a);
         }
 
-        // 2. Live checks only while the exchange is trading.
-        let (phase, exchange_open, session) = {
+        // 2. Live checks while the exchange is trading, plus a closing check
+        //    of the structure setups on the day's last prices.
+        let (phase, exchange_open, session, trading_day) = {
             let s = self.state.read().unwrap();
             let cal = &s.account.settings.calendar;
             let open = lk_midnight(today) + (cal.open - chrono::NaiveTime::MIN);
@@ -311,18 +314,28 @@ impl AppService {
                 .status
                 .as_deref()
                 .is_some_and(|t| t.to_ascii_lowercase().contains("close"));
-            (cal.phase_at(now), ex_open, (open, close))
+            (
+                cal.phase_at(now),
+                ex_open,
+                (open, close),
+                cal.is_trading_day(today),
+            )
         };
-        if phase != MarketPhase::Open || !exchange_open {
+        let (open, close) = session;
+        let closing = phase == MarketPhase::Closed
+            && trading_day
+            && now >= close
+            && now < close + Duration::hours(CLOSING_CHECK_HOURS);
+        let trading = phase == MarketPhase::Open && exchange_open;
+        if !trading && !closing {
             return Ok(());
         }
-        let (open, close) = session;
         let fraction = ((now - open).num_seconds() as f64 / (close - open).num_seconds() as f64)
             .clamp(0.0, 1.0);
 
         // Intraday trades, refreshed every few minutes per stock.
         let intraday_on = SignalKind::INTRADAY.iter().any(|k| book.signal_on(*k));
-        if intraday_on {
+        if intraday_on && !closing {
             for sym in &favourites {
                 let due = {
                     let s = self.state.read().unwrap();
@@ -387,10 +400,12 @@ impl AppService {
                 session_fraction: fraction,
             };
             if let Some(a) = s.analysis.get(sym) {
-                if let Some(levels) = &a.levels {
-                    triggers.extend(evaluate_daily(levels, &live, &params));
+                if !closing {
+                    if let Some(levels) = &a.levels {
+                        triggers.extend(evaluate_daily(levels, &live, &params));
+                    }
+                    triggers.extend(a.intraday_triggers.iter().cloned());
                 }
-                triggers.extend(a.intraday_triggers.iter().cloned());
                 // Market structure: each setup fires once per swing.
                 if let Some(st) = &a.structure {
                     let view =
@@ -477,7 +492,7 @@ impl AppService {
             }
         }
         // Custom levels: any stock with a quote, favourite or not.
-        for c in book.custom.iter_mut().filter(|c| c.active) {
+        for c in book.custom.iter_mut().filter(|c| c.active && !closing) {
             let Some(q) = s.market.quotes.get(&c.symbol) else {
                 continue;
             };
