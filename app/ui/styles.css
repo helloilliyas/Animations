@@ -175,3 +175,27 @@ textarea { min-height: 110px; font-family: ui-monospace, monospace; font-size: 1
 .sig { border-top: 1px solid var(--line); padding: 8px 0; }
 .sig.off { opacity: .45; }
 .sig-head { display: flex; justify-content: space-between; gap: 8px; }
+
+/* market structure */
+.mk { font-size: 11px; font-weight: 700; padding: 1px 6px; border-radius: 6px; margin-left: 4px; white-space: nowrap; vertical-align: 1px; }
+.mk-look { color: var(--up); } .mk.mk-look { background: rgba(34,197,94,.18); }
+.mk-ready { color: var(--warn); } .mk.mk-ready { background: rgba(245,158,11,.18); }
+.mk-up { color: #86efac; } .mk-down { color: #fca5a5; } .mk-range, .mk-thin { color: var(--muted); }
+.mk-chips { margin: 4px 0 6px; }
+.mk-summary { margin: 0 0 8px; }
+.struct { margin-top: 12px; }
+.struct .swings { margin-top: 6px; line-height: 1.7; }
+.plan { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 4px; }
+.chart-wrap { position: relative; margin-top: 10px; }
+.chart-wrap .chart { margin-top: 0; }
+.swing { position: absolute; transform: translate(-50%, -100%); font-size: 9px; font-weight: 700; line-height: 1; pointer-events: none; display: flex; flex-direction: column-reverse; align-items: center; gap: 1px; }
+.swing.lo { transform: translate(-50%, 0); flex-direction: column; }
+.swing i { width: 6px; height: 6px; border-radius: 50%; background: currentColor; display: block; }
+.swing.hi i { margin-bottom: -3px; } .swing.lo i { margin-top: -3px; }
+.bg-modes { margin: 6px 0 10px; }
+.bg-modes button { font-size: 12px; padding: 7px 4px; }
+.bg-modes button:disabled { opacity: .5; }
+details.indicators { margin-top: 8px; }
+details summary { cursor: pointer; }
+.struct-settings { margin-top: 10px; }
+.fav-card .struct { margin-top: 6px; padding: 10px; background: var(--panel-2); }

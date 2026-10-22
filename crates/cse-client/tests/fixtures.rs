@@ -133,3 +133,15 @@ fn aspi_chart() {
     let day = map::index_chart(&fixture("indexChart-1D"));
     assert_eq!(day.len(), 300);
 }
+
+#[test]
+fn company_quote_before_first_trade_shows_previous_close() {
+    // Captured before the open on 22 Oct 2026: no last price yet.
+    let v = serde_json::json!({"reqSymbolInfo": {"id": 148, "symbol": "WATA.N0000",
+        "name": "WATAWALA  PLANTATIONS  PLC", "lastTradedPrice": null, "previousClose": 46.6,
+        "closingPrice": 0.0, "change": null, "changePercentage": null,
+        "tdyShareVolume": 0, "tdyTradeVolume": 0, "tdyTurnover": 0.0}});
+    let q = map::company_quote("WATA.N0000", &v).unwrap();
+    assert_eq!(q.last.to_string(), "46.6");
+    assert!(q.change.is_zero() && q.change_pct.is_zero());
+}

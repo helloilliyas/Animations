@@ -75,7 +75,7 @@ const state = {
   market: null,
   quotes: [],
   topTab: prefGet("topTab", "gainers"),
-  watch: { filter: "", sort: prefGet("watchSort", "symbol"), list: prefGet("watchList", "all") },
+  watch: { filter: "", sort: prefGet("watchSort", "look"), list: prefGet("watchList", "all"), mark: "all" },
   ordersTab: "open",
   portfolioTab: prefGet("portfolioTab", "paper"),
   ticket: { side: "Buy", symbol: "", type: "Limit", qty: "", price: "", tif: "Day", days: 2 },
@@ -171,9 +171,33 @@ function mountMarket(root) {
 
 // ---------- Watch ----------
 let watchLists = [];
-function sortQuotes(list) {
-  const by = state.watch.sort;
+// Market-structure marker per favourite: [icon, text, class].
+const MARK = {
+  look_now: ["●", "Look now", "mk-look"],
+  get_ready: ["◐", "Get ready", "mk-ready"],
+  uptrend: ["↗", "Uptrend", "mk-up"],
+  range: ["↔", "Range", "mk-range"],
+  downtrend: ["↘", "Downtrend", "mk-down"],
+  thin: ["·", "Thinly traded", "mk-thin"],
+  pending: ["…", "Checking", "mk-thin"],
+  no_data: ["–", "No history yet", "mk-thin"],
+};
+const MARK_ORDER = Object.keys(MARK);
+let markers = { markers: {}, counts: {} };
+const markOf = (sym) => markers.markers[sym];
+function markBadge(m) {
+  if (!m) return "";
+  let [icon, text, cls] = MARK[m.status] || MARK.pending;
+  const full = m.status === "look_now" || m.status === "get_ready";
+  // Thin stocks get no alerts but still show their trend.
+  if (m.status === "thin") icon = ({ Up: "↗", Down: "↘", Range: "↔" }[m.trend] || "") + " thin";
+  return `<span class="mk ${cls}" title="${text}">${icon}${full ? " " + text : ""}${m.star ? " ⭐" : ""}</span>`;
+}
+function sortQuotes(list) { return sortQuotesBy(list, state.watch.sort); }
+function sortQuotesBy(list, by) {
+  const rank = (q) => { const m = markOf(q.symbol); return m ? MARK_ORDER.indexOf(m.status) : MARK_ORDER.length; };
   const key = {
+    look: (q) => rank(q),
     symbol: (q) => q.symbol,
     change: (q) => -num(q.change_pct),
     turnover: (q) => -num(q.turnover),
@@ -181,16 +205,37 @@ function sortQuotes(list) {
   }[by];
   return [...list].sort((a, b) => {
     const x = key(a), y = key(b);
-    return typeof x === "string" ? x.localeCompare(y) : x - y;
+    return (typeof x === "string" ? x.localeCompare(y) : x - y) || a.symbol.localeCompare(b.symbol);
   });
 }
-function renderWatch() {
+const MARK_FILTERS = {
+  all: ["All", () => true],
+  look_now: ["Look now", (m) => m && m.status === "look_now"],
+  get_ready: ["Get ready", (m) => m && m.status === "get_ready"],
+  uptrend: ["Uptrend", (m) => m && m.trend === "Up"],
+};
+const BG_TEXT = { off: "Background checks off", 60: "Checks every hour", 30: "Checks every 30 min", 15: "Checks every 15 min", live: "Live background checks" };
+async function renderWatch() {
+  try { markers = await call("favourite_markers"); } catch { /* keep the last markers */ }
   const f = state.watch.filter.trim().toUpperCase();
   let list = state.quotes;
   if (state.watch.list !== "all") {
     const wl = watchLists.find((w) => String(w.id) === String(state.watch.list));
     const set = new Set(wl ? wl.symbols : []);
     list = list.filter((q) => set.has(q.symbol));
+  }
+  const inList = state.watch.list !== "all";
+  let summary = "";
+  if (inList) {
+    const ms = list.map((q) => markOf(q.symbol));
+    const n = (k) => ms.filter(MARK_FILTERS[k][1]).length;
+    summary = `
+    <div class="chips mk-chips">${Object.entries(MARK_FILTERS).map(([k, [label]]) =>
+      `<button class="chip ${state.watch.mark === k ? "on" : ""}" data-mark="${k}">${label}${k === "all" ? "" : ` ${n(k)}`}</button>`).join("")}</div>
+    <div class="small muted mk-summary">${list.length} stocks · <span class="mk-look">${n("look_now")} look now</span> ·
+      <span class="mk-ready">${n("get_ready")} get ready</span> · ${n("uptrend")} uptrend
+      ${markers.updated_at ? ` · prices ${timeStr(markers.updated_at)}` : ""} · ${BG_TEXT[markers.background_mode] || ""}</div>`;
+    list = list.filter((q) => MARK_FILTERS[state.watch.mark][1](markOf(q.symbol)));
   }
   if (f) list = list.filter((q) => q.symbol.includes(f) || q.name.toUpperCase().includes(f));
   list = sortQuotes(list);
@@ -206,16 +251,22 @@ function renderWatch() {
     <div class="toolbar">
       <input id="watch-search" placeholder="Search symbol or company" value="${esc(state.watch.filter)}" autocomplete="off">
       <select id="watch-sort" style="max-width:130px">
-        ${["symbol", "change", "turnover", "trades"].map((s) =>
-          `<option value="${s}" ${state.watch.sort === s ? "selected" : ""}>${{ symbol: "Symbol", change: "Change %", turnover: "Turnover", trades: "Trades" }[s]}</option>`).join("")}
+        ${["look", "symbol", "change", "turnover", "trades"].map((s) =>
+          `<option value="${s}" ${state.watch.sort === s ? "selected" : ""}>${{ look: "Look first", symbol: "Symbol", change: "Change %", turnover: "Turnover", trades: "Trades" }[s]}</option>`).join("")}
       </select>
-    </div>
-    <div class="list">${list.length ? list.slice(0, 400).map((q) => `
+    </div>${summary}
+    <div class="list">${list.length ? list.slice(0, 400).map((q) => {
+      const m = markOf(q.symbol);
+      const why = m && m.label ? `<div class="sub ${MARK[m.status][2]}">${esc(m.label)}${m.detail ? " · " + esc(m.detail) : ""}</div>` : "";
+      return `
       <div class="row" data-symbol="${esc(q.symbol)}">
-        <div><div class="sym">${esc(q.symbol)}</div><div class="sub">${esc(q.name)}</div></div>
+        <div><div class="sym">${esc(q.symbol)} ${markBadge(m)}</div><div class="sub">${esc(q.name)}</div>${why}</div>
         <div class="right"><div class="num">${fmt(q.last)}</div><div class="small muted num">${fmtInt(q.share_volume)}</div></div>
         <div class="right"><span class="pill ${dir(q.change)} num">${pct(q.change_pct)}</span></div>
-      </div>`).join("") : `<div class="empty">${state.watch.list === "all" ? "No securities match" : "This list is empty. Open a stock and tap ☆ to add it."}</div>`}
+      </div>`;
+    }).join("") : `<div class="empty">${!inList ? "No securities match"
+      : state.watch.mark !== "all" ? "No stocks with this marker right now."
+      : "This list is empty. Open a stock and tap ☆ to add it."}</div>`}
     </div>`;
 }
 function mountWatch(root) {
@@ -229,6 +280,7 @@ function mountWatch(root) {
   $("#watch-sort", root).onchange = (e) => { state.watch.sort = e.target.value; prefSet("watchSort", state.watch.sort); render(); };
   $("#wl-select", root).onchange = (e) => { state.watch.list = e.target.value; prefSet("watchList", state.watch.list); render(); };
   $("#wl-import", root).onclick = () => openImport();
+  $$("[data-mark]", root).forEach((b) => (b.onclick = () => { state.watch.mark = b.dataset.mark; render(); }));
   $("#wl-new", root).onclick = async () => {
     const name = prompt("Watch list name");
     if (!name) return;
@@ -282,7 +334,8 @@ async function loadWatchLists() { watchLists = await call("watch_lists"); }
 // ---------- charts ----------
 const RANGES = ["1D", "1W", "1M", "3M", "1Y", "All"];
 const chartCache = new Map(); // "key|range" -> { at, data }
-function chartSvg(points) {
+// Swing points (HH/HL/LH/LL) drawn over the chart as positioned dots.
+function chartSvg(points, swings = []) {
   const w = 600, h = 170, pad = 4;
   const ys = points.map((p) => num(p.price));
   const xs = points.map((p) => new Date(p.at).getTime());
@@ -298,12 +351,20 @@ function chartSvg(points) {
   const up = ys[ys.length - 1] >= ys[0];
   const color = up ? "var(--up)" : "var(--down)";
   const gid = "g" + Math.random().toString(36).slice(2, 8);
-  return `<svg class="chart" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" role="img" aria-label="Price chart">
+  const dots = swings
+    .filter((sw) => sw.time * 1000 >= minX && sw.time * 1000 <= maxX)
+    .map((sw) => {
+      const y = Math.min(Math.max(sy(sw.price), 0), h);
+      const lbl = sw.label || (sw.kind === "High" ? "H" : "L");
+      const cls = sw.label === "HH" || sw.label === "HL" ? "up" : sw.label ? "down" : "flat";
+      return `<span class="swing ${cls} ${sw.kind === "High" ? "hi" : "lo"}" style="left:${(sx(sw.time * 1000) / w * 100).toFixed(2)}%;top:${(y / h * 100).toFixed(2)}%"><i></i>${lbl}</span>`;
+    }).join("");
+  return `<div class="chart-wrap"><svg class="chart" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" role="img" aria-label="Price chart">
     <defs><linearGradient id="${gid}" x1="0" y1="0" x2="0" y2="1">
       <stop offset="0" stop-color="${up ? "#22c55e" : "#ef4444"}" stop-opacity=".28"/>
       <stop offset="1" stop-color="${up ? "#22c55e" : "#ef4444"}" stop-opacity="0"/></linearGradient></defs>
     <path d="${area}" fill="url(#${gid})" stroke="none"/>
-    <path class="line" d="${line}" stroke="${color}" vector-effect="non-scaling-stroke"/></svg>`;
+    <path class="line" d="${line}" stroke="${color}" vector-effect="non-scaling-stroke"/></svg>${dots}</div>`;
 }
 function chartLabel(iso, range) {
   const d = new Date(iso);
@@ -313,7 +374,7 @@ function chartLabel(iso, range) {
     : { month: "short", year: "numeric" };
   return d.toLocaleString("en-GB", { timeZone: "Asia/Colombo", ...opts });
 }
-function chartBody(data) {
+function chartBody(data, swings) {
   const pts = data.points || [];
   const note = data.error ? `<div class="small muted">CSE history unavailable right now — showing saved data.</div>` : "";
   const saved = data.history_days
@@ -322,7 +383,7 @@ function chartBody(data) {
     return `<div class="empty small">${data.range === "1D" ? "No trades yet today." : "No price history yet."}</div>${note}${saved}`;
   }
   const ys = pts.map((p) => num(p.price));
-  return `${chartSvg(pts)}
+  return `${chartSvg(pts, data.range === "1D" ? [] : swings)}
     <div class="legend small muted"><span>${chartLabel(pts[0].at, data.range)}</span>
       <span class="num ${dir(data.change)}">${signed(data.change)} (${pct(data.change_pct)})</span>
       <span>${chartLabel(pts[pts.length - 1].at, data.range)}</span></div>
@@ -330,7 +391,7 @@ function chartBody(data) {
     ${note}${data.range === "All" ? saved : ""}`;
 }
 // Renders a chart with range buttons into `el`. symbol = null for ASPI.
-async function mountChart(el, symbol) {
+async function mountChart(el, symbol, swings = []) {
   const key = symbol || "ASPI";
   let range = prefGet("chartRange", "1M");
   const draw = async () => {
@@ -344,12 +405,12 @@ async function mountChart(el, symbol) {
     const cacheKey = key + "|" + range;
     const ttl = range === "1D" ? 60e3 : 10 * 60e3;
     const hit = chartCache.get(cacheKey);
-    if (hit && Date.now() - hit.at < ttl) { area.innerHTML = chartBody(hit.data); return; }
+    if (hit && Date.now() - hit.at < ttl) { area.innerHTML = chartBody(hit.data, swings); return; }
     area.innerHTML = `<div class="empty small">Loading chart…</div>`;
     try {
       const data = await call("chart", symbol ? { symbol, range } : { range });
       chartCache.set(cacheKey, { at: Date.now(), data });
-      if (el.isConnected) area.innerHTML = chartBody(data);
+      if (el.isConnected) area.innerHTML = chartBody(data, swings);
     } catch (e) {
       area.innerHTML = `<div class="empty small">${esc(e.message || e)}</div>`;
     }
@@ -362,6 +423,10 @@ async function openQuote(symbol) {
   if (!q) { toast("No data for " + symbol, true); return; }
   await loadWatchLists();
   const inList = watchLists.some((w) => w.symbols.includes(symbol));
+  let fav = null, alertsView = null;
+  if (inList) {
+    try { alertsView = await call("alerts"); fav = alertsView.favourites.find((f) => f.symbol === symbol); } catch { /* optional */ }
+  }
   const field = (k, v) => `<div class="k">${k}</div><div class="v">${v}</div>`;
   openSheet(`
     <div class="sheet-head"><h3>${esc(q.symbol)}</h3>
@@ -373,6 +438,7 @@ async function openQuote(symbol) {
       <div class="right"><span class="pill ${dir(q.change)} num">${signed(q.change)} (${pct(q.change_pct)})</span></div>
     </div>
     <div class="chart-box" id="q-chart"></div>
+    ${fav ? structureCard(fav, alertsView) : ""}
     <div class="card" style="margin-top:12px"><div class="kv">
       ${field("Open", fmt(q.open))}${field("High", fmt(q.high))}${field("Low", fmt(q.low))}
       ${field("Prev. close", fmt(q.prev_close))}${field("Volume", fmtInt(q.share_volume))}
@@ -388,7 +454,7 @@ async function openQuote(symbol) {
       <button class="btn sell" id="q-sell">Sell</button>
     </div>
     <div class="btn-row"><button class="btn ghost" id="q-tv">📈 TradingView chart &amp; tools</button></div>`, (root) => {
-    mountChart($("#q-chart", root), symbol);
+    mountChart($("#q-chart", root), symbol, (fav && fav.structure && fav.structure.swings) || []);
     $("#q-buy", root).onclick = () => { closeSheet(); goTicket(symbol, "Buy", q.last); };
     $("#q-sell", root).onclick = () => { closeSheet(); goTicket(symbol, "Sell", q.last); };
     $("#q-tv", root).onclick = () => { closeSheet(); openTradingView(symbol); };
@@ -769,6 +835,7 @@ const bgBridge = (() => {
       isRunning: () => send("isRunning"),
       wanted: () => send("wanted"),
       notify: (id, title, body) => send("notify", { nid: Number(id), title, body }),
+      schedule: (minutes) => send("schedule", { minutes }),
     });
   };
 })();
@@ -781,7 +848,7 @@ async function checkAlerts() {
   if (lastAlertId === null) { lastAlertId = r.latest_id; prefSet("lastAlertId", lastAlertId); return; }
   const bridge = bgBridge();
   for (const a of r.alerts) {
-    const title = `${a.symbol} · ${a.kind}`;
+    const title = `${a.symbol.replace(/\.N0000$/, "")} · ${a.kind}`;
     toast(`🔔 ${title}: ${a.message}`);
     if (bridge) {
       // The background service posts its own notifications while running.
@@ -808,10 +875,54 @@ function distance(price, level) {
   const d = (num(level) / num(price) - 1) * 100;
   return `<span class="muted small">(${d >= 0 ? "+" : ""}${fmt(d, 1)}% away)</span>`;
 }
+const TREND = { Up: ["↗ Uptrend", "up"], Down: ["↘ Downtrend", "down"], Range: ["↔ Range", "flat"] };
+function swingChain(st) {
+  return st.swings.slice(-6).map((w) => {
+    const cls = w.label === "HH" || w.label === "HL" ? "up" : w.label ? "down" : "muted";
+    return `<span class="${cls}">${w.label || (w.kind === "High" ? "H" : "L")}&nbsp;${fmt(w.price)}</span>`;
+  }).join(" → ");
+}
+function setupBlock(x, labels) {
+  const P = x.plan;
+  const when = x.triggered ? `<span class="mk-look">Triggered</span>` : `<span class="${x.distance_pct <= 2 ? "mk-ready" : "muted"}">${fmt(x.distance_pct, 1)}% to ${fmt(x.trigger)}</span>`;
+  return `<div class="sig ${P.passes ? "" : "off"}">
+    <div class="sig-head"><b>${esc(labels[x.kind] || x.kind)}</b><span class="small">${when}</span></div>
+    <div class="small muted">${esc(x.note)}</div>
+    <div class="plan num small"><span>Entry <b>${fmt(P.entry)}</b></span><span>Stop <b>${fmt(P.stop)}</b> <span class="down">−${fmt(P.risk_pct, 1)}%</span></span>
+      <span>Target <b>${fmt(P.target)}</b> <span class="up">+${fmt(P.reward_pct, 1)}%</span></span><span><b>${fmt(P.reward_risk, 1)}×</b></span></div>
+    ${P.passes ? "" : `<div class="small muted">Skipped: reward/risk under the ${fmt(labels.min_rr, 1)}× minimum or too small to cover fees.</div>`}
+  </div>`;
+}
+function structureCard(f, v) {
+  const labels = Object.fromEntries(v.structure_labels);
+  labels.min_rr = v.params.min_reward_risk;
+  const st = f.structure, sv = f.structure_view;
+  if (!st) {
+    return `<div class="card struct"><b>Market structure</b><div class="small muted">${f.pending ? "Checking… (needs the next data refresh)" : esc(f.error || "Not enough history yet (needs 30 trading days)")}</div></div>`;
+  }
+  const [tl, tc] = TREND[st.trend];
+  const m = markOf(f.symbol);
+  const recs = (f.structure_records || []).filter((r) => r.fired);
+  return `<div class="card struct">
+    <div class="sig-head"><b>Market structure</b>${markBadge(m || (sv && { status: statusKey(sv.status), star: sv.weekly_star }))}</div>
+    <div class="small"><span class="${tc}">${tl}</span> · weekly ${st.weekly_trend ? `<span class="${TREND[st.weekly_trend][1]}">${st.weekly_trend}</span>` : "—"}
+      · swings of ${fmt(st.threshold_pct, 1)}%+${st.liquid ? "" : ` · <span class="muted">thinly traded (Rs. ${fmtVol(st.avg_turnover)}/day) — no alerts</span>`}</div>
+    <div class="small swings">${swingChain(st)}</div>
+    ${sv && sv.setups.length ? sv.setups.map((x) => setupBlock(x, labels)).join("")
+      : `<div class="small muted" style="margin-top:6px">${st.trend === "Up"
+        ? "Uptrend, no entry yet: waiting for a pullback that holds above the last low, or a break of the last high."
+        : st.trend === "Down" ? "Downtrend: lower highs and lower lows. Nothing to do until it breaks the last high."
+        : "No clear trend: highs and lows are mixed."}</div>`}
+    <div class="small" style="margin-top:6px">${recs.length
+      ? recs.map((r) => `${esc(labels[r.kind] || r.kind)}: ${recordLine(r)}`).join("<br>")
+      : `<span class="muted">No structure signals on this stock in the past year.</span>`}</div>
+  </div>`;
+}
+const statusKey = (s) => ({ LookNow: "look_now", GetReady: "get_ready", Uptrend: "uptrend", Range: "range", Downtrend: "downtrend", Thin: "thin" })[s] || "pending";
 function favouriteCard(f, v) {
   const L = f.levels, recs = {};
   (f.records || []).forEach((r) => (recs[r.kind] = r));
-  const on = (k) => v.signals[k] !== false;
+  const on = (k) => v.signals[k] === true;
   const row = (kind, title, valueHtml, detail) => `
     <div class="sig ${on(kind) ? "" : "off"}">
       <div class="sig-head"><b>${title}</b><span class="num">${valueHtml}</span></div>
@@ -823,7 +934,7 @@ function favouriteCard(f, v) {
   else if (!L) body = `<div class="small muted">${esc(f.error || "Not enough history yet")}</div>`;
   else {
     const I = f.intraday;
-    body = (L.liquid ? "" : `<div class="banner">Thinly traded (avg turnover Rs. ${fmtBig(L.avg_turnover)}/day) — signals are off for this stock.</div>`) +
+    body = `<details class="indicators"><summary class="small muted">Other indicators${Object.keys(v.labels).some(on) ? "" : " (off)"}</summary>` + (L.liquid ? "" : `<div class="banner">Thinly traded (avg turnover Rs. ${fmtBig(L.avg_turnover)}/day) — signals are off for this stock.</div>`) +
       row("Breakout", "Breakout above", `${fmt(L.breakout_level)} ${distance(f.price, L.breakout_level)}`,
         `20-day high + buffer, with volume above ${fmtVol(L.breakout_volume)} shares/day`) +
       row("Pullback", "Pullback to", L.pullback_level ? `${fmt(L.pullback_level)} ${distance(f.price, L.pullback_level)}` : "—",
@@ -838,13 +949,14 @@ function favouriteCard(f, v) {
         I ? (I.moves_cover_fees ? `09:30–10:00 high ${fmt(I.opening_high)}` : "Typical daily move too small to cover fees — off")
           : "Checked during market hours") +
       row("VolumeSpike", "Volume spike", I ? `> ${fmtVol(I.avg_bar_volume * v.params.spike_mult)} shares` : "—",
-        `${fmt(v.params.spike_mult, 0)}× usual volume in a rising 15-minute bar`);
+        `${fmt(v.params.spike_mult, 0)}× usual volume in a rising 15-minute bar`) + `</details>`;
   }
   return `<div class="card fav-card">
     <div class="fav-head" data-symbol="${esc(f.symbol)}">
       <div><b>${esc(f.symbol)}</b><div class="small muted">${esc(f.name || "")}</div></div>
       <div class="right"><div class="num">${fmt(f.price)}</div><div class="small num ${dir(f.change_pct)}">${f.change_pct != null ? pct(f.change_pct) : ""}</div></div>
     </div>
+    ${structureCard(f, v)}
     ${body}
     <div class="btn-row"><button class="btn small ghost" data-custom="${esc(f.symbol)}">+ My own price alert</button></div>
   </div>`;
@@ -856,28 +968,52 @@ async function renderAlerts() {
   if (br) {
     const running = await br.isRunning();
     if (running !== v.background) {
-      await call("update_alert_config", { background: running });
-      v = { ...v, background: running };
+      // Stopped from the notification: fall back to timed checks.
+      const mode = running ? "live" : v.background_mode === "live" ? "30" : v.background_mode;
+      await call("update_alert_config", { background: running, background_mode: mode });
+      if (!running && v.background_mode === "live") await br.schedule(30);
+      v = { ...v, background: running, background_mode: mode };
     }
   }
 
   unseenAlerts = 0; prefSet("unseenAlerts", 0); setBellDot();
+  markers = await call("favourite_markers").catch(() => markers);
   const bridge = bgBridge();
-  const chips = Object.keys(v.labels).map((k) =>
-    `<button class="chip ${v.signals[k] !== false ? "on" : ""}" data-sig="${k}">${esc(v.labels[k])}</button>`).join("");
+  const chip = (k, label) => `<button class="chip ${v.signals[k] === true ? "on" : ""}" data-sig="${k}">${esc(label)}</button>`;
+  const structChips = v.structure_labels.map(([k, label]) => chip(k, label)).join("");
+  const chips = Object.keys(v.labels).map((k) => chip(k, v.labels[k])).join("");
+  const P = v.params;
+  const numIn = (id, val, step, label, help) => `<div><label for="${id}">${label}</label>
+    <input id="${id}" type="number" inputmode="decimal" step="${step}" value="${esc(val)}"><div class="small muted">${help}</div></div>`;
+  const modes = [["off", "Off"], ["60", "Every hour"], ["30", "Every 30 min"], ["15", "Every 15 min"], ["live", "Live"]];
   return `
     <div class="card">
       <label class="switch-row"><span><b>Alerts</b><br><span class="small muted">Signals for stocks in your watch lists</span></span>
         <input type="checkbox" id="al-enabled" ${v.enabled ? "checked" : ""}></label>
-      <label class="switch-row"><span><b>Background mode</b><br><span class="small muted">
-        ${bridge ? "Keep checking 9:30–2:30 when the app is closed. Shows a small permanent notification while on."
-                 : "Available in the Android app."}</span></span>
-        <input type="checkbox" id="al-bg" ${v.background ? "checked" : ""} ${bridge ? "" : "disabled"}></label>
+      <div class="switch-row"><span><b>Background checks</b><br><span class="small muted">
+        ${bridge ? "When the app is closed, during trading hours 9:30–2:30 plus one check after the close. Live checks every few seconds and shows a permanent notification."
+                 : "Available in the Android app."}</span></span></div>
+      <div class="seg bg-modes">${modes.map(([k, label]) =>
+        `<button data-bg="${k}" class="${v.background_mode === k ? "active" : ""}" ${bridge ? "" : "disabled"}>${label}</button>`).join("")}</div>
+      <label class="switch-row"><span><b>Get ready notifications</b><br><span class="small muted">Also notify when a stock is within ${fmt(P.near_pct, 1)}% of a trigger (always marked in the Watch list)</span></span>
+        <input type="checkbox" id="al-ready" ${v.notify_get_ready ? "checked" : ""}></label>
     </div>
-    <h2>Signals</h2>
+    <h2>Market structure</h2>
+    <div class="chips">${structChips}</div>
+    <details class="card struct-settings"><summary><b>Structure settings</b> <span class="small muted">swings ${fmt(P.min_swing_pct, 0)}%+ · reward/risk ${fmt(P.min_reward_risk, 1)}×</span></summary>
+      <div class="grid2">
+        ${numIn("p-swing", P.min_swing_pct, "0.5", "Smallest swing (%)", "Moves smaller than this are noise")}
+        ${numIn("p-mult", P.swing_range_mult, "0.5", "× daily range", "Swing must also be this many typical days")}
+        ${numIn("p-rr", P.min_reward_risk, "0.5", "Min reward/risk", "Skip setups paying less than this")}
+        ${numIn("p-near", P.near_pct, "0.5", "Get ready within (%)", "Distance to trigger for “Get ready”")}
+        ${numIn("p-turn", P.min_avg_turnover, "100000", "Min daily turnover (Rs.)", "Below this a stock is “thin”: no alerts")}
+      </div>
+      <div class="btn-row"><button class="btn small primary" id="p-save">Save</button></div>
+    </details>
+    <h2>Other indicators</h2>
     <div class="chips">${chips}</div>
     <h2>Favourites</h2>
-    ${v.favourites.length ? v.favourites.map((f) => favouriteCard(f, v)).join("")
+    ${v.favourites.length ? sortQuotesBy(v.favourites, "look").map((f) => favouriteCard(f, v)).join("")
       : `<div class="card empty">No favourites yet. Open a stock and tap ☆ to add it to a watch list.</div>`}
     <h2>My price alerts</h2>
     <div class="list">${v.custom.length ? v.custom.map((c) => `
@@ -893,19 +1029,27 @@ async function renderAlerts() {
         <div class="right num small">${fmt(a.price)}</div><div class="right small muted">${timeStr(a.at)}</div></div>`).join("")
       : `<div class="empty">No alerts yet. Signals are checked during market hours.</div>`}</div>
     ${v.history.length ? `<div class="btn-row"><button class="btn small ghost" id="al-clear">Clear history</button></div>` : ""}
-    <p class="muted small">Signals are prompts to look at a stock, not buy recommendations. Track records show how each signal did on that stock over the past year, after ~${fmt(v.params.round_trip_fee_pct)}% buy+sell fees.</p>`;
+    <p class="muted small">Signals are prompts to look at a stock, not buy recommendations. Higher low entry and Uptrend confirmed fire once per swing; “Downtrend broken” is riskier and off by default. Track records show how each signal did on that stock over the past year, after ~${fmt(v.params.round_trip_fee_pct)}% buy+sell fees.</p>`;
 }
 function mountAlerts(root) {
   $("#al-enabled", root).onchange = (e) => attempt(() => call("update_alert_config", { enabled: e.target.checked }));
-  $("#al-bg", root).onchange = async (e) => {
-    const on = e.target.checked;
-    const bridge = bgBridge();
-    if (!bridge) return;
+  $$("[data-bg]", root).forEach((b) => (b.onclick = async () => {
+    const mode = b.dataset.bg;
     try {
-      if (on) await bridge.start((await call("outbox_path")) || ""); else await bridge.stop();
-      await call("update_alert_config", { background: on });
-      toast(on ? "Background mode on" : "Background mode off");
-    } catch (err) { e.target.checked = !on; toast(String(err.message || err), true); }
+      await applyBackground(mode);
+      await call("update_alert_config", { background_mode: mode, background: mode === "live" });
+      toast(BG_TEXT[mode]);
+    } catch (err) { toast(String(err.message || err), true); }
+    render();
+  }));
+  $("#al-ready", root).onchange = (e) => attempt(() => call("update_alert_config", { notify_get_ready: e.target.checked }));
+  $("#p-save", root).onclick = async () => {
+    const v = await call("alerts");
+    const val = (id) => num($(id, root).value);
+    const params = { ...v.params, min_swing_pct: val("#p-swing"), swing_range_mult: val("#p-mult"), min_reward_risk: val("#p-rr"), near_pct: val("#p-near"), min_avg_turnover: val("#p-turn") };
+    if (Object.values(params).some((x) => typeof x === "number" && !Number.isFinite(x))) { toast("Enter numbers only", true); return; }
+    await attempt(() => call("update_alert_config", { params }), "Saved — markers update on the next check");
+    render();
   };
   $$("[data-sig]", root).forEach((b) => (b.onclick = async () => {
     const on = !b.classList.contains("on");
@@ -946,13 +1090,27 @@ $("#open-alerts").onclick = () => switchTab("alerts");
 
 // On launch, restore background mode if it was on and Android stopped it
 // (e.g. after a restart), but not if the user tapped Stop.
+// Live runs the foreground service; the timed modes schedule periodic
+// checks (Android WorkManager) that run the Rust check without the UI.
+async function applyBackground(mode) {
+  const br = bgBridge();
+  if (!br) throw new Error("Background checks need the Android app");
+  if (mode === "live") {
+    await br.schedule(0);
+    await br.start((await call("outbox_path")) || "");
+  } else {
+    await br.stop();
+    await br.schedule(mode === "off" ? 0 : Number(mode));
+  }
+}
 async function restoreBackground() {
   const br = bgBridge();
   if (!br) return;
   const cfg = await call("alerts");
-  if (!cfg.background || (await br.isRunning())) return;
+  if (cfg.background_mode !== "live") { await br.schedule(cfg.background_mode === "off" ? 0 : Number(cfg.background_mode)); return; }
+  if (await br.isRunning()) return;
   if (await br.wanted()) await br.start((await call("outbox_path")) || "");
-  else await call("update_alert_config", { background: false });
+  else await call("update_alert_config", { background: false, background_mode: "30" }).then(() => br.schedule(30));
 }
 
 // ---------- Settings ----------

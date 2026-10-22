@@ -364,6 +364,13 @@ pub mod map {
         if q.symbol.is_empty() {
             q.symbol = symbol.to_owned();
         }
+        // Before its first trade of the day the last price is null: show
+        // the previous close rather than 0.
+        if q.last.is_zero() && !q.prev_close.is_zero() {
+            q.last = q.prev_close;
+            q.change = rust_decimal::Decimal::ZERO;
+            q.change_pct = rust_decimal::Decimal::ZERO;
+        }
         Ok(q)
     }
 

@@ -687,7 +687,7 @@ impl AppService {
                     "structure": a.and_then(|a| a.structure.as_ref()),
                     "structure_records": a.map(|a| &a.structure_records),
                     "structure_view": a.and_then(|a| a.structure.as_ref()).map(|st| {
-                        let live = q.map(live_of);
+                        let live = q.and_then(live_of);
                         structure::evaluate(st, live.as_ref(), &b.params, &b.enabled_structure())
                     }),
                     "history_days": a.map(|a| a.history_days),
@@ -704,6 +704,10 @@ impl AppService {
             .chain(SignalKind::INTRADAY.iter())
             .map(|k| (format!("{k:?}"), k.label()))
             .collect();
+        let structure_labels: Vec<(String, &str)> = SignalKind::STRUCTURE
+            .iter()
+            .map(|k| (format!("{k:?}"), k.label()))
+            .collect();
         Ok(json!({
             "enabled": b.enabled,
             "background": b.background,
@@ -711,6 +715,7 @@ impl AppService {
             "notify_get_ready": b.notify_get_ready,
             "signals": b.signals,
             "labels": labels,
+            "structure_labels": structure_labels,
             "params": b.params,
             "favourites": rows,
             "custom": b.custom,
@@ -725,14 +730,14 @@ fn short(symbol: &str) -> &str {
 }
 
 /// Today's figures from a quote, for evaluating levels outside the refresh.
-fn live_of(q: &cse_core::Quote) -> Live {
+fn live_of(q: &cse_core::Quote) -> Option<Live> {
     let price = to_f64(q.last);
-    Live {
+    (price > 0.0).then(|| Live {
         price,
         day_low: q.low.map_or(price, to_f64),
         volume: q.share_volume as f64,
         session_fraction: 1.0,
-    }
+    })
 }
 
 fn status_name(s: Status) -> &'static str {
@@ -763,7 +768,7 @@ impl AppService {
             let marker = match a.and_then(|a| a.structure.as_ref()) {
                 None => json!({ "status": if a.is_none() { "pending" } else { "no_data" } }),
                 Some(st) => {
-                    let live = q.map(live_of);
+                    let live = q.and_then(live_of);
                     let view = structure::evaluate(st, live.as_ref(), &b.params, &enabled);
                     // A setup that fired today keeps the stock in "look now".
                     let fired_today = b.history.iter().rev().find(|f| {
