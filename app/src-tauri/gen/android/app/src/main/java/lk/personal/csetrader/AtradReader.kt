@@ -25,11 +25,12 @@ import java.io.File
  * - **Sync from ATrad**: taps Sign in when the login is already filled in,
  *   opens Portfolio → Detailed, opens each holding's row and reads the
  *   text, then returns to CSE Trader.
- * - **Place in ATrad**: signs in the same way, opens the Buy Sell tab and
- *   fills in the symbol, quantity and price. It never taps Buy, Sell,
- *   Submit or any confirm button and never enters a PIN: the user checks
- *   and confirms the order in ATrad. If the fields cannot be identified
- *   with certainty, nothing is typed.
+ * - **Place in ATrad**: signs in the same way, opens the Buy Sell tab,
+ *   picks the exact symbol, sets the Buy/Sell switch (only when it can be
+ *   told apart from the submit button) and fills quantity and price. It
+ *   never taps the submit button or any confirm and never enters a PIN:
+ *   the user checks and confirms the order in ATrad. Any step that cannot
+ *   be confirmed stops the filling.
  *
  * Screens and fields are recognised by their visible words.
  */
@@ -90,6 +91,7 @@ class AtradReader : AccessibilityService() {
         private var tabTappedAt = 0L
         private var selectAt = 0L
         private var typed = false
+        private var sideTaps = 0
 
         fun orderLogFile(ctx: Context) = File(ctx.filesDir, "atrad-order.json")
 
@@ -108,6 +110,7 @@ class AtradReader : AccessibilityService() {
                 lastTap = 0L
                 tabTappedAt = 0L
                 orderStage = 0
+                sideTaps = 0
                 order = o
             }
             ctx.startActivity(launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
@@ -221,15 +224,15 @@ class AtradReader : AccessibilityService() {
     }
 
     /**
-     * Fills ATrad's Buy Sell screen in checked steps, never tapping a button
-     * there (the Buy/Sell switch and the submit button share their words):
+     * Fills ATrad's Buy Sell screen in checked steps, never tapping the
+     * submit button (it shares its word with the Buy/Sell switch):
      *
      * 0. Open Buy Sell. If the stock box (a tap-to-pick selector showing the
      *    current symbol) is not the order's stock, tap it.
      * 1. In the selector, type the code and tap the result that is exactly
      *    the order's symbol.
-     * 2. Back on Buy Sell, check the stock box shows that symbol; only then
-     *    fill quantity and price.
+     * 2. Back on Buy Sell, check the stock box shows that symbol, set the
+     *    Buy/Sell switch, then fill quantity and price.
      * 3. Check ATrad took them: the boxes show them and Order Value equals
      *    quantity x price. Otherwise warn loudly.
      *
@@ -301,6 +304,27 @@ class AtradReader : AccessibilityService() {
                 finishOrder("ATrad shows ${shown?.first ?: "another stock"}, not ${o.symbol}. Nothing was filled.", texts)
                 return
             }
+            // Buy or Sell: the switch and the submit button share the word,
+            // and the submit button follows the switch. The order's side
+            // twice means it is selected; once (the other twice) means the
+            // only node with that word is the switch, so it is safe to tap.
+            val want = if (o.side.equals("sell", true)) "sell" else "buy"
+            val other = if (want == "sell") "buy" else "sell"
+            val wantCount = texts.count { isWord(it, want) }
+            val otherCount = texts.count { isWord(it, other) }
+            if (!(wantCount == 2 && otherCount == 1)) {
+                if (wantCount == 1 && otherCount == 2 && sideTaps < 2) {
+                    find(root) { isWord(it, want) }?.let {
+                        if (tap(it)) {
+                            sideTaps++
+                            lastTap = now
+                            return
+                        }
+                    }
+                }
+                finishOrder("Selected ${o.symbol}, but could not switch ATrad to ${want.uppercase()} — choose it yourself. Nothing else was filled.", texts)
+                return
+            }
             val qtyField = fieldFor(root, listOf("quantity", "qty", "order qty", "order quantity"))
             val priceField = fieldFor(root, listOf("price", "limit price", "order price"))
             if (qtyField == null || priceField == null || qtyField == priceField) {
@@ -320,13 +344,15 @@ class AtradReader : AccessibilityService() {
             ?.let { texts.getOrNull(it + 1) }?.let { num(it) }
         val q = num(o.qty)
         val p = num(o.price)
-        val ok = shown?.first == o.symbol && num(qtyShown) == q && num(priceShown) == p &&
+        val want = if (o.side.equals("sell", true)) "sell" else "buy"
+        val other = if (want == "sell") "buy" else "sell"
+        val sideOk = texts.count { isWord(it, want) } == 2 && texts.count { isWord(it, other) } == 1
+        val ok = shown?.first == o.symbol && sideOk && num(qtyShown) == q && num(priceShown) == p &&
             value != null && q != null && p != null && kotlin.math.abs(value - q * p) < 0.5
-        val side = if (o.side.equals("sell", true)) " Switch ATrad to SELL before confirming." else " Make sure Buy is selected."
         if (ok) {
-            finishOrder("Filled ✓ ${o.side.uppercase()} ${o.symbol} ${o.qty} @ ${o.price} (order value ${"%,.2f".format(value)}).$side Then confirm in ATrad.", texts)
+            finishOrder("Filled ✓ ${want.uppercase()} ${o.symbol} ${o.qty} @ ${o.price} (order value ${"%,.2f".format(value)}). Check it, then confirm in ATrad.", texts)
         } else {
-            finishOrder("⚠ ATrad did not take the order correctly (stock ${shown?.first}, quantity ${qtyShown}, price ${priceShown}, order value ${value}). Check every field before confirming.", texts)
+            finishOrder("⚠ ATrad did not take the order correctly (stock ${shown?.first}, side ${if (sideOk) want.uppercase() else "?"}, quantity ${qtyShown}, price ${priceShown}, order value ${value}). Check every field before confirming.", texts)
         }
     }
 

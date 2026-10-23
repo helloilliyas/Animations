@@ -117,10 +117,13 @@ Signals are prompts to look at a stock, not buy recommendations.
 ATrad: the price is filled in (last price, the plan's entry, or target /
 stop / break-even for sells), you type the quantity, and it shows the cost
 or proceeds after fees. **Place in ATrad** copies the order (e.g. `BUY DIPD
-1,000 @ 56.50`), opens ATrad and, with the ATrad reader on, goes to Buy Sell
-and fills in the symbol, quantity and price. It never taps Buy, Sell or
-Submit and never enters a PIN: you check the order and confirm it in ATrad.
-If it cannot tell the fields apart with certainty it types nothing.
+1,000 @ 56.50`), opens ATrad and, with the ATrad reader on, goes to Buy Sell,
+picks exactly that symbol (ACL.N0000, never ACL.X0000) in ATrad's stock
+search and checks it is selected, sets the Buy/Sell switch (only when it
+can be told apart from the submit button, which shares its word), fills in
+quantity and price, and checks ATrad's Order Value equals quantity x price.
+It never taps the submit button and never enters a PIN: you confirm the
+order in ATrad. Any step that cannot be confirmed stops the filling.
 Back in CSE Trader it asks whether the order was placed and records the fill
 in the Real portfolio, optionally with alerts at the plan's stop and target.
 "Practise on paper instead" opens the paper ticket.

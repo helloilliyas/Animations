@@ -1399,7 +1399,7 @@ async function openAtradTicket(symbol, side, q, fav) {
     ${plan ? `<p class="small muted">Plan: entry ${fmt(plan.entry)} · stop ${fmt(plan.stop)} · target ${fmt(plan.target)} (${fmt(plan.reward_risk, 1)}×)</p>` : ""}
     <div class="card" id="at-sum"><div class="small muted">Enter a quantity to see the cost.</div></div>
     <div class="btn-row"><button class="btn ${side === "Buy" ? "buy" : "sell"}" id="at-place">Place in ATrad</button></div>
-    <p class="small muted">Opens ATrad's Buy Sell screen with the symbol, quantity and price filled in (when the ATrad reader is on). Check Buy/Sell and confirm it there yourself. <a href="#" id="at-paper">Practise on paper instead</a></p>`, (sh) => {
+    <p class="small muted">Opens ATrad's Buy Sell screen with the symbol, Buy/Sell, quantity and price filled in and checked (when the ATrad reader is on). You confirm it there yourself. <a href="#" id="at-paper">Practise on paper instead</a></p>`, (sh) => {
     let curSide = side;
     const price = $("#at-price", sh), qty = $("#at-qty", sh), sum = $("#at-sum", sh), place = $("#at-place", sh);
     const update = async () => {
@@ -1505,7 +1505,7 @@ async function syncFromAtrad() {
 }
 function openAtradSetup() {
   openSheet(`<div class="sheet-head"><h3>Allow reading ATrad</h3><button class="icon-btn" data-close>✕</button></div>
-    <p class="small">CSE Trader uses an Android accessibility service that <b>only works inside ATrad</b>, and only when you ask. <b>Sync from ATrad</b> taps Sign in when your login is already filled in, opens Portfolio → Detailed and reads your holdings. <b>Place in ATrad</b> opens Buy Sell and fills in the symbol, quantity and price. It never taps Buy, Sell or Submit and never enters your PIN: you confirm every order yourself.</p>
+    <p class="small">CSE Trader uses an Android accessibility service that <b>only works inside ATrad</b>, and only when you ask. <b>Sync from ATrad</b> taps Sign in when your login is already filled in, opens Portfolio → Detailed and reads your holdings. <b>Place in ATrad</b> opens Buy Sell, picks the exact symbol, sets Buy or Sell and fills in the quantity and price. It never taps the submit button and never enters your PIN: you confirm every order yourself.</p>
     <ol class="small">
       <li>Tap <b>Open settings</b>, then <b>Installed apps</b> (or Downloaded apps).</li>
       <li>Choose <b>CSE Trader – read ATrad portfolio</b> and turn it on.</li>

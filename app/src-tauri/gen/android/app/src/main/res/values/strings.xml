@@ -2,5 +2,5 @@
     <string name="app_name">"CSE Trader"</string>
     <string name="main_activity_title">"CSE Trader"</string>
     <string name="atrad_access_label">CSE Trader – read ATrad portfolio</string>
-    <string name="atrad_access_description">Lets CSE Trader work inside the ATrad app when you ask: Sync from ATrad reads your holdings (it taps Sign in if your login is already filled in, opens Portfolio → Detailed and reads each holding); Place in ATrad opens Buy Sell and fills in the symbol, quantity and price. It never taps Buy, Sell or Submit and never enters your PIN — you confirm every order yourself.</string>
+    <string name="atrad_access_description">Lets CSE Trader work inside the ATrad app when you ask: Sync from ATrad reads your holdings (it taps Sign in if your login is already filled in, opens Portfolio → Detailed and reads each holding); Place in ATrad opens Buy Sell, picks the exact symbol, sets Buy or Sell and fills in the quantity and price. It never taps the submit button and never enters your PIN — you confirm every order yourself.</string>
 </resources>
