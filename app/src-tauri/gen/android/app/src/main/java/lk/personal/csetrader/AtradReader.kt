@@ -6,6 +6,7 @@ import android.content.ClipboardManager
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.graphics.Rect
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -304,23 +305,21 @@ class AtradReader : AccessibilityService() {
                 finishOrder("ATrad shows ${shown?.first ?: "another stock"}, not ${o.symbol}. Nothing was filled.", texts)
                 return
             }
-            // Buy or Sell: the switch and the submit button share the word,
-            // and the submit button follows the switch. The order's side
-            // twice means it is selected; once (the other twice) means the
-            // only node with that word is the switch, so it is safe to tap.
+            // Buy or Sell, found by position: the switch is the Buy and Sell
+            // side by side on one row; the submit button is below it and its
+            // label shows the selected side. Only the switch is ever tapped.
             val want = if (o.side.equals("sell", true)) "sell" else "buy"
-            val other = if (want == "sell") "buy" else "sell"
-            val wantCount = texts.count { isWord(it, want) }
-            val otherCount = texts.count { isWord(it, other) }
-            if (!(wantCount == 2 && otherCount == 1)) {
-                if (wantCount == 1 && otherCount == 2 && sideTaps < 2) {
-                    find(root) { isWord(it, want) }?.let {
-                        if (tap(it)) {
-                            sideTaps++
-                            lastTap = now
-                            return
-                        }
-                    }
+            val side = sideControls(root)
+            if (side == null) {
+                finishOrder("Selected ${o.symbol}, but could not find ATrad's Buy/Sell switch — choose ${want.uppercase()} and enter the order yourself.", texts)
+                return
+            }
+            if (side.selected != want) {
+                val target = if (want == "sell") side.sell else side.buy
+                if (sideTaps < 2 && tap(target)) {
+                    sideTaps++
+                    lastTap = now
+                    return
                 }
                 finishOrder("Selected ${o.symbol}, but could not switch ATrad to ${want.uppercase()} — choose it yourself. Nothing else was filled.", texts)
                 return
@@ -345,8 +344,7 @@ class AtradReader : AccessibilityService() {
         val q = num(o.qty)
         val p = num(o.price)
         val want = if (o.side.equals("sell", true)) "sell" else "buy"
-        val other = if (want == "sell") "buy" else "sell"
-        val sideOk = texts.count { isWord(it, want) } == 2 && texts.count { isWord(it, other) } == 1
+        val sideOk = sideControls(root)?.selected == want
         val ok = shown?.first == o.symbol && sideOk && num(qtyShown) == q && num(priceShown) == p &&
             value != null && q != null && p != null && kotlin.math.abs(value - q * p) < 0.5
         if (ok) {
@@ -357,6 +355,43 @@ class AtradReader : AccessibilityService() {
     }
 
     private fun num(s: String?): Double? = s?.replace(",", "")?.trim()?.toDoubleOrNull()
+
+    /** ATrad's Buy/Sell switch halves and the side its submit button shows. */
+    private class SideControls(val buy: AccessibilityNodeInfo, val sell: AccessibilityNodeInfo, val selected: String)
+
+    private fun sideControls(root: AccessibilityNodeInfo): SideControls? {
+        // Each label once per place on screen (ATrad reports some twice).
+        fun hits(word: String): List<Pair<AccessibilityNodeInfo, Rect>> {
+            val out = mutableListOf<Pair<AccessibilityNodeInfo, Rect>>()
+            fun walk(n: AccessibilityNodeInfo?) {
+                n ?: return
+                textOf(n)?.let { t ->
+                    if (isWord(t, word)) {
+                        val r = Rect().also { n.getBoundsInScreen(it) }
+                        if (!r.isEmpty && out.none { (_, o) -> Rect.intersects(o, r) }) out.add(n to r)
+                    }
+                }
+                for (i in 0 until n.childCount) walk(n.getChild(i))
+            }
+            walk(root)
+            return out
+        }
+        val buys = hits("buy")
+        val sells = hits("sell")
+        // The switch: a Buy and a Sell on the same row, side by side.
+        var pair: Pair<Pair<AccessibilityNodeInfo, Rect>, Pair<AccessibilityNodeInfo, Rect>>? = null
+        for (b in buys) for (sl in sells) {
+            val sameRow = kotlin.math.abs(b.second.centerY() - sl.second.centerY()) < maxOf(b.second.height(), 20) / 2
+            if (sameRow && b.second.centerX() < sl.second.centerX()) pair = b to sl
+        }
+        val (b, sl) = pair ?: return null
+        val rowBottom = maxOf(b.second.bottom, sl.second.bottom)
+        // The submit button: the one Buy or Sell below the switch.
+        val below = (buys.filter { it.second.top >= rowBottom }.map { "buy" } +
+            sells.filter { it.second.top >= rowBottom }.map { "sell" })
+        if (below.size != 1) return null
+        return SideControls(b.first, sl.first, below[0])
+    }
 
     private fun firstEditable(root: AccessibilityNodeInfo): AccessibilityNodeInfo? {
         fun walk(n: AccessibilityNodeInfo?): AccessibilityNodeInfo? {
