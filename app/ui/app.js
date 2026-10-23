@@ -1508,9 +1508,10 @@ async function reviewAtradCapture(cap) {
   openSheet(`<div class="sheet-head"><h3>Holdings in ATrad</h3><button class="icon-btn" data-close>✕</button></div>
     <p class="small muted">Read ${r.rows.length} holding${r.rows.length === 1 ? "" : "s"} from ${cap.pages} screen${cap.pages === 1 ? "" : "s"}. Tick what to bring into your Real portfolio.</p>
     <div class="list">${r.rows.map((x, i) => `
-      <label class="row" style="cursor:pointer"><div><b>${esc(ticker(x.symbol))}</b> <span class="small ${x.change === "same" ? "muted" : "mk-ready"}">${label[x.change]}</span>
-        <div class="sub">ATrad ${fmtInt(x.qty)} @ ${x.avg_cost != null ? fmt(x.avg_cost) : "?"} · yours ${fmtInt(x.ours_qty)}${x.ours_avg != null ? " @ " + fmt(x.ours_avg) : ""}${x.confident ? "" : " · <span class=\"down\">check: read from position</span>"}</div></div><div></div>
-        <input type="checkbox" data-row="${i}" ${x.change !== "same" ? "checked" : ""}></label>`).join("") || `<div class="empty small">No holdings recognised.</div>`}
+      <div class="row" style="cursor:default"><div><b>${esc(ticker(x.symbol))}</b> <span class="small ${x.change === "same" ? "muted" : "mk-ready"}">${label[x.change]}</span>
+        <div class="sub">ATrad ${fmtInt(x.qty)}${x.avg_cost != null ? " @ " + fmt(x.avg_cost) : ""} · yours ${fmtInt(x.ours_qty)}${x.ours_avg != null ? " @ " + fmt(x.ours_avg) : ""}${x.confident ? "" : " · <span class=\"down\">check: read from position</span>"}</div>
+        ${x.avg_cost == null ? `<input class="avg-in" data-avg="${i}" type="number" inputmode="decimal" step="0.01" placeholder="Avg cost (not on this ATrad screen)${x.ours_avg != null ? " — blank keeps " + fmt(x.ours_avg) : " — blank uses last price"}">` : ""}</div><div></div>
+        <input type="checkbox" data-row="${i}" ${x.change !== "same" ? "checked" : ""}></div>`).join("") || `<div class="empty small">No holdings recognised.</div>`}
       ${r.missing.map((m) => `
       <label class="row" style="cursor:pointer"><div><b>${esc(ticker(m.symbol))}</b> <span class="small down">Not in ATrad</span>
         <div class="sub">yours ${fmtInt(m.qty)} · close it in your Real portfolio?</div></div><div></div>
@@ -1519,8 +1520,12 @@ async function reviewAtradCapture(cap) {
     <p class="small muted">Changes are added as adjustment trades dated today (no fees), so your history stays.</p>
     ${rawTexts(cap.texts)}`, (sh) => {
     $("#rv-apply", sh).onclick = async () => {
-      const rows = $$("[data-row]", sh).filter((c) => c.checked).map((c) => r.rows[Number(c.dataset.row)])
-        .map((x) => ({ symbol: x.symbol, qty: x.qty, avg_cost: x.avg_cost }));
+      const rows = $$("[data-row]", sh).filter((c) => c.checked).map((c) => {
+        const i = Number(c.dataset.row), x = r.rows[i];
+        const typed = $(`[data-avg="${i}"]`, sh);
+        const avg = x.avg_cost ?? (typed && typed.value ? String(typed.value) : null);
+        return { symbol: x.symbol, qty: x.qty, avg_cost: avg };
+      });
       const remove = $$("[data-remove]", sh).filter((c) => c.checked).map((c) => c.dataset.remove);
       const res = await attempt(() => call("atrad_apply", { rows, remove }));
       toast(`Real portfolio updated (${res.changed} adjustment${res.changed === 1 ? "" : "s"})`);

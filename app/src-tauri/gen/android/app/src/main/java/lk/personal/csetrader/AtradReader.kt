@@ -35,6 +35,7 @@ class AtradReader : AccessibilityService() {
         private var active = false
         private var startedAt = 0L
         private var signInTapped = false
+        private var detailedTapped = false
         private var lastTap = 0L
         private val pages = mutableListOf<List<String>>()
 
@@ -57,6 +58,7 @@ class AtradReader : AccessibilityService() {
             active = true
             startedAt = System.currentTimeMillis()
             signInTapped = false
+            detailedTapped = false
             lastTap = 0L
             pages.clear()
             ctx.startActivity(launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
@@ -114,7 +116,18 @@ class AtradReader : AccessibilityService() {
                 return
             }
         }
-        // 2. The holdings: read this page, then scroll for more.
+        // 2. On the portfolio, open the Detailed tab (it has the average
+        //    cost) before reading.
+        if (!detailedTapped) {
+            find(root) { isWord(it, "detailed") }?.let {
+                if (tap(it)) {
+                    detailedTapped = true
+                    lastTap = now
+                    return
+                }
+            }
+        }
+        // 3. The holdings: read this page, then scroll for more.
         if (texts.any { isHoldingsLabel(it) }) {
             if (pages.lastOrNull() == texts) {
                 finish(true, "")
@@ -124,15 +137,16 @@ class AtradReader : AccessibilityService() {
             if (pages.size >= MAX_PAGES || !scrollForward(root)) finish(true, "")
             return
         }
-        // 3. Find the way there: the Detailed tab, else the Portfolio tab.
-        val target = find(root) { isWord(it, "detailed") } ?: find(root) { isWord(it, "portfolio") }
+        // 4. Find the way there: the Portfolio tab.
+        val target = find(root) { isWord(it, "portfolio") }
         if (target != null && tap(target)) lastTap = now
     }
 
+    /** Column or field names of a holdings list. */
     private fun isHoldingsLabel(t: String): Boolean {
-        val l = t.lowercase()
+        val l = t.lowercase().trim()
         return (l.contains("holding") && (l.contains("qty") || l.contains("quantity"))) ||
-            l.startsWith("avg. cost") || l.startsWith("avg cost")
+            l.startsWith("avg. cost") || l.startsWith("avg cost") || l == "quantity"
     }
 
     private fun isWord(t: String, vararg words: String) =

@@ -45,17 +45,32 @@ fn is_whole(s: &str) -> bool {
     !s.contains('.') && number(s).is_some_and(|d| d >= Decimal::ZERO)
 }
 
-/// A CSE symbol at the start of `s`, if it is a known security.
+/// `JKH.N0000`-style CSE symbols: code, a dot, class letter, four digits.
+fn is_cse_symbol(t: &str) -> bool {
+    let Some((code, class)) = t.split_once('.') else {
+        return false;
+    };
+    (1..=8).contains(&code.len())
+        && code.chars().all(|c| c.is_ascii_alphanumeric() || c == '&')
+        && code.chars().any(|c| c.is_ascii_alphabetic())
+        && class.len() == 5
+        && class.as_bytes()[0].is_ascii_alphabetic()
+        && class[1..].chars().all(|c| c.is_ascii_digit())
+}
+
+/// A CSE symbol at the start of `s`: any full symbol (`CLND.N0000`), or a
+/// bare code of a known security (`CLND`).
 fn symbol_of(s: &str, known: &HashSet<String>) -> Option<String> {
     let first = s
-        .split([' ', '-', '\n'])
+        .split([' ', '\n'])
         .next()?
         .trim()
+        .trim_end_matches([',', ';', ':'])
         .to_ascii_uppercase();
     if first.len() < 2 {
         return None;
     }
-    if known.contains(&first) {
+    if is_cse_symbol(&first) || known.contains(&first) {
         return Some(first);
     }
     let n = format!("{first}.N0000");
@@ -87,11 +102,49 @@ fn label_of(s: &str) -> Option<Label> {
     }
 }
 
+/// A whole row read as one text, e.g. `CLND.N0000, 18,085, 5.86%, 44.10, -`
+/// (cells joined by ", "; thousands separators have no space). Gives the
+/// quantity (first whole number that is not a percentage); prices in such
+/// rows are not labelled, so no average cost.
+fn row_text(t: &str, known: &HashSet<String>) -> Option<Captured> {
+    let cells: Vec<&str> = t.split(", ").map(str::trim).collect();
+    if cells.len() < 2 {
+        return None;
+    }
+    let symbol = symbol_of(cells[0], known)?;
+    let qty = cells[1..]
+        .iter()
+        .find(|c| !c.contains('%') && is_whole(c))
+        .and_then(|c| number(c))
+        .and_then(|q| u64::try_from(q.trunc()).ok())?;
+    Some(Captured {
+        symbol,
+        qty,
+        avg_cost: None,
+        last: None,
+        confident: true,
+    })
+}
+
 /// Holdings in the captured text; each symbol once (scrolled pages repeat).
+/// Labelled values win, then whole-row texts, then values by position.
 pub fn parse_capture(texts: &[String], known: &HashSet<String>) -> Vec<Captured> {
+    let mut out = parse_segments(texts, known);
+    for row in texts.iter().filter_map(|t| row_text(t, known)) {
+        match out.iter_mut().find(|c| c.symbol == row.symbol) {
+            Some(c) if !c.confident => *c = row,
+            Some(_) => {}
+            None => out.push(row),
+        }
+    }
+    out
+}
+
+fn parse_segments(texts: &[String], known: &HashSet<String>) -> Vec<Captured> {
     let starts: Vec<(usize, String)> = texts
         .iter()
         .enumerate()
+        .filter(|(_, t)| !t.contains(", "))
         .filter_map(|(i, t)| symbol_of(t, known).map(|s| (i, s)))
         .collect();
     let mut out: Vec<Captured> = Vec::new();
@@ -124,12 +177,12 @@ pub fn parse_capture(texts: &[String], known: &HashSet<String>) -> Vec<Captured>
         if qty.is_none() {
             // Table rows: quantity is the first whole number, the average
             // cost the first price after it.
-            let qi = seg.iter().position(|t| is_whole(t));
+            let qi = seg.iter().position(|t| !t.contains('%') && is_whole(t));
             qty = qi.and_then(|i| number(&seg[i]));
             avg = qi.and_then(|i| {
                 seg[i + 1..]
                     .iter()
-                    .find(|t| t.contains('.') && number(t).is_some())
+                    .find(|t| t.contains('.') && !t.contains('%') && number(t).is_some())
                     .and_then(|t| number(t))
             });
         }
@@ -230,6 +283,18 @@ impl AppService {
     fn atrad_apply(&self, a: ApplyArgs) -> Result<Value> {
         let today = lk_day(self.now());
         let mut changed = 0;
+        let last_prices: BTreeMap<String, Decimal> = {
+            let s = self.state.read().unwrap();
+            a.rows
+                .iter()
+                .filter_map(|r| {
+                    s.market
+                        .quotes
+                        .get(&r.symbol)
+                        .map(|q| (r.symbol.clone(), q.last))
+                })
+                .collect()
+        };
         self.mutate_real(|real, fees| {
             let mut targets: BTreeMap<String, (u64, Option<Decimal>)> = a
                 .rows
@@ -249,7 +314,12 @@ impl AppService {
                 } else {
                     Decimal::ZERO
                 };
-                let a1 = a1.unwrap_or(avg0);
+                // No cost on ATrad's screen: keep ours, or use the last price
+                // for a holding new to this app.
+                let a1 = a1
+                    .or((avg0 > Decimal::ZERO).then_some(avg0))
+                    .or_else(|| last_prices.get(&sym).copied())
+                    .unwrap_or(avg0);
                 let mut tx = |side, qty: u64, price: Decimal| {
                     if qty == 0 || price <= Decimal::ZERO {
                         return Ok::<(), crate::ServiceError>(());
@@ -344,6 +414,37 @@ mod tests {
         assert!(c[0].confident);
         assert_eq!(c[1].symbol, "WATA.N0000");
         assert_eq!((c[1].qty, c[1].avg_cost), (1500, Some(dec!(44.10))));
+    }
+
+    #[test]
+    fn whole_row_texts_from_atrad() {
+        // As read on the phone (Portfolio list: Symbol, Quantity, Last
+        // Price, Holdings %, Change); CLND is not in `known`.
+        let texts = t(&[
+            "Symbol",
+            "Quantity",
+            "Last Price",
+            "Holdings %",
+            "Change",
+            "CLND.N0000, 18,085, 5.86%, 44.10, -",
+            "CLND.N0000",
+            "18,085",
+            "5.86%",
+            "44.10",
+            "-",
+            "JKH.N0000, 2,000, 3.10%, 19.20, 0.10",
+            "JKH.N0000",
+            "2,000",
+            "3.10%",
+            "19.20",
+            "0.10",
+        ]);
+        let c = parse_capture(&texts, &known());
+        assert_eq!(c.len(), 2, "{c:?}");
+        assert_eq!((c[0].symbol.as_str(), c[0].qty), ("CLND.N0000", 18085));
+        assert_eq!(c[0].avg_cost, None, "last price is not the average cost");
+        assert!(c[0].confident);
+        assert_eq!((c[1].symbol.as_str(), c[1].qty), ("JKH.N0000", 2000));
     }
 
     #[test]
