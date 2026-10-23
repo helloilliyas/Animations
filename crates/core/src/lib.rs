@@ -7,6 +7,7 @@ pub mod fees;
 pub mod market_hours;
 pub mod models;
 pub mod tick;
+pub mod us_market;
 
 pub use fees::{FeeComponent, FeeSchedule};
 pub use market_hours::{MarketCalendar, MarketPhase};

@@ -96,6 +96,13 @@ impl AppService {
     /// The `chart` command.
     pub(crate) async fn chart(&self, args: Value) -> Result<Value> {
         let a: ChartArgs = parse(args)?;
+        if let Some(sym) = a
+            .symbol
+            .as_deref()
+            .filter(|s| cse_core::us_market::is_us(s))
+        {
+            return self.us_chart(sym, a.range).await;
+        }
         let key = a.symbol.clone().unwrap_or_else(|| ASPI_KEY.to_owned());
         let now = self.now();
         let today = lk_day(now);

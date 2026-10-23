@@ -10,6 +10,7 @@ mod chart;
 mod history;
 mod import_list;
 mod market;
+mod us;
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -76,6 +77,18 @@ struct State {
     looked_up: HashMap<String, chrono::NaiveDate>,
     /// When the market copy was last saved.
     copy_saved_at: Option<DateTime<Utc>>,
+    us: us::UsState,
+}
+
+impl State {
+    /// The latest quote for a CSE or US symbol.
+    fn quote(&self, symbol: &str) -> Option<&Quote> {
+        if cse_core::us_market::is_us(symbol) {
+            self.us.quotes.get(symbol).map(|e| &e.quote)
+        } else {
+            self.market.quotes.get(symbol)
+        }
+    }
 }
 
 pub struct AppService {
@@ -87,6 +100,8 @@ pub struct AppService {
     outbox: Option<std::path::PathBuf>,
     /// One refresh at a time (UI, poller and scheduled checks share it).
     refreshing: tokio::sync::Mutex<()>,
+    /// US stock prices (the user's own key; see `us`).
+    twelve: cse_client::twelve::TwelveData,
 }
 
 impl AppService {
@@ -100,6 +115,12 @@ impl AppService {
         )?;
         svc.outbox = Some(outbox);
         Ok(svc)
+    }
+
+    /// Uses another Twelve Data server (tests).
+    pub fn with_twelve(mut self, client: cse_client::twelve::TwelveData) -> Self {
+        self.twelve = client;
+        self
     }
 
     /// Writes fired alerts to `path` (one JSON object per line).
@@ -124,6 +145,7 @@ impl AppService {
         store.log_alerts(&rows)?;
         let synced: HashMap<String, chrono::NaiveDate> =
             store.load_json(alerts::SYNCED_KEY)?.unwrap_or_default();
+        let us = us::UsState::load(&store);
         // Last prices from the previous run, until the CSE serves new ones.
         // A copy that cannot be read is ignored rather than blocking start-up.
         let market = match store.load_json::<MarketData>(MARKET_COPY_KEY) {
@@ -148,10 +170,12 @@ impl AppService {
                 analysis: HashMap::new(),
                 looked_up: HashMap::new(),
                 copy_saved_at: None,
+                us,
             }),
             clock,
             outbox: None,
             refreshing: tokio::sync::Mutex::new(()),
+            twelve: cse_client::twelve::TwelveData::default(),
         })
     }
 
@@ -167,7 +191,12 @@ impl AppService {
 
     /// How long the poller should wait before the next refresh.
     pub fn next_refresh_in(&self) -> std::time::Duration {
-        poll_interval(self.phase())
+        let cse = poll_interval(self.phase());
+        if self.us_active() {
+            cse.min(std::time::Duration::from_secs(60))
+        } else {
+            cse
+        }
     }
 
     /// Runs forever: refresh, then sleep according to the market phase.
@@ -182,8 +211,14 @@ impl AppService {
     /// snapshots. Individual feed failures are recorded, not fatal.
     pub async fn refresh(&self) -> Result<()> {
         let _one = self.refreshing.lock().await;
-        self.refresh_market().await?;
-        self.update_alerts().await
+        let cse = match self.refresh_market().await {
+            Ok(()) => self.update_alerts().await,
+            Err(e) => Err(e),
+        };
+        // US stocks do not depend on the CSE feeds; their errors are shown
+        // in the US settings instead.
+        let _ = self.update_us().await;
+        cse
     }
 
     async fn refresh_market(&self) -> Result<()> {
@@ -330,6 +365,12 @@ impl AppService {
         if cmd == "chart" {
             return self.chart(args).await;
         }
+        if cmd == "us_search" {
+            return self.us_search(args).await;
+        }
+        if let Some(r) = self.us_command(cmd, args.clone()) {
+            return r;
+        }
         if let Some(r) = self.history_command(cmd, args.clone()) {
             return r;
         }
@@ -342,14 +383,9 @@ impl AppService {
         if cmd == "quote" {
             // Fetch detail for symbols not in the all-share list (e.g. debt).
             let a: SymbolArg = parse(args.clone())?;
-            let cached = self
-                .state
-                .read()
-                .unwrap()
-                .market
-                .quotes
-                .contains_key(&a.symbol);
-            if !cached {
+            let cached = self.state.read().unwrap().quote(&a.symbol).is_some();
+            // US quotes come from the US feed only.
+            if !cached && !cse_core::us_market::is_us(&a.symbol) {
                 let q = self.client.quote(&a.symbol).await?;
                 self.state
                     .write()
@@ -372,14 +408,20 @@ impl AppService {
             }
             "quotes" => {
                 let s = self.state.read().unwrap();
-                let mut q: Vec<&Quote> = s.market.quotes.values().collect();
+                let mut q: Vec<&Quote> = s
+                    .market
+                    .quotes
+                    .values()
+                    .chain(s.us.quotes.values().map(|e| &e.quote))
+                    .collect();
                 q.sort_by(|a, b| a.symbol.cmp(&b.symbol));
                 to_json(q)
             }
             "quote" => {
                 let a: SymbolArg = parse(args)?;
                 let s = self.state.read().unwrap();
-                let quote = s.market.quotes.get(&a.symbol);
+                let quote = s.quote(&a.symbol);
+                let us = s.us.quotes.get(&a.symbol);
                 let history = self.store.lock().unwrap().price_history(
                     &a.symbol,
                     now - Duration::days(SNAPSHOT_DAYS),
@@ -388,6 +430,7 @@ impl AppService {
                 let acc = &s.account;
                 to_json(json!({
                     "quote": quote,
+                    "us": us.map(|e| json!({"exchange": e.exchange, "market_open": e.market_open})),
                     "held": acc.portfolio().qty(&a.symbol),
                     "available_to_sell": acc.available_to_sell(&a.symbol),
                     "pending_buy": acc.pending_qty(&a.symbol, Side::Buy),
@@ -424,6 +467,11 @@ impl AppService {
             }
             "place_order" => {
                 let a: PlaceArgs = parse(args)?;
+                if cse_core::us_market::is_us(&a.order.symbol) {
+                    return Err(ServiceError::BadArgs(
+                        "US stocks are for watching and alerts only".into(),
+                    ));
+                }
                 let id = self.mutate_account(|s| {
                     let reference = a
                         .reference_price

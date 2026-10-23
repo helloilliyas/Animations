@@ -39,9 +39,13 @@ async fn stub(routes: HashMap<&'static str, String>) -> String {
                     .nth(1)
                     .unwrap_or("")
                     .trim_start_matches("/api/");
-                // Intraday chart requests (period=1) get their own fixture.
+                // Twelve Data requests are GETs with a query string.
+                let path = path.split('?').next().unwrap_or("");
+                // Intraday chart requests (CSE period=1, Twelve Data 5min)
+                // get their own fixture.
                 let intraday = format!("{path}#1D");
-                let key = if req.contains("period=1") && routes.contains_key(intraday.as_str()) {
+                let is_intraday = req.contains("period=1") || req.contains("interval=5min");
+                let key = if is_intraday && routes.contains_key(intraday.as_str()) {
                     intraday.as_str()
                 } else {
                     path
@@ -128,11 +132,12 @@ impl Harness {
         let _ = std::fs::remove_file(&outbox);
         let svc = AppService::with(
             Store::open_in_memory().unwrap(),
-            CseClient::new(base).with_retries(0),
+            CseClient::new(base.clone()).with_retries(0),
             Arc::new(move || *c.lock().unwrap()),
         )
         .unwrap()
-        .with_outbox(&outbox);
+        .with_outbox(&outbox)
+        .with_twelve(cse_client::twelve::TwelveData::new(base));
         Self { svc, clock, outbox }
     }
 
@@ -915,4 +920,166 @@ async fn uptrend_broken_marker_and_optional_notification() {
     // Once per swing.
     h.set_time(lk_on(16, 12, 0));
     assert_eq!(h.svc.run_check().await.unwrap(), 0);
+}
+
+/// Twelve Data daily bars for the uptrend used in the CSE tests, ending
+/// Thursday 22 Oct (New York date).
+fn us_daily_uptrend() -> String {
+    let legs: [f64; 7] = [100.0, 110.0, 90.0, 120.0, 105.0, 135.0, 122.0];
+    let mut closes = vec![legs[0]];
+    for w in legs.windows(2) {
+        let steps = ((w[1] / w[0]).ln().abs() / 0.01).ceil() as usize;
+        for i in 1..=steps {
+            closes.push(w[0] * (w[1] / w[0]).powf(i as f64 / steps as f64));
+        }
+    }
+    let end = chrono::NaiveDate::from_ymd_opt(2026, 10, 22).unwrap();
+    let n = closes.len();
+    // Newest first, as Twelve Data sends them.
+    let values: Vec<Value> = closes
+        .iter()
+        .enumerate()
+        .rev()
+        .map(|(i, c)| {
+            let c = (c * 100.0_f64).round() / 100.0;
+            let day = end - chrono::Duration::days((n - 1 - i) as i64);
+            json!({"datetime": day.to_string(), "open": c, "high": c * 1.004,
+                   "low": c * 0.996, "close": c, "volume": "30000000"})
+        })
+        .collect();
+    json!({"meta": {"symbol": "AAPL", "interval": "1day"}, "values": values, "status": "ok"})
+        .to_string()
+}
+
+fn us_quote(t: &str, price: f64, low: f64, at: DateTime<Utc>, open: bool) -> Value {
+    json!({"symbol": t, "name": format!("{t} Inc."), "exchange": "NASDAQ", "currency": "USD",
+           "timestamp": at.timestamp(), "last_quote_at": at.timestamp(),
+           "open": price, "high": price, "low": low, "close": price, "volume": "1000000",
+           "previous_close": price - 1.0, "change": "1.0", "percent_change": "0.8",
+           "is_market_open": open})
+}
+
+#[tokio::test]
+async fn us_favourites_get_prices_markers_and_alerts() {
+    // Friday 23 Oct 2026 14:00 UTC = 10:00 New York (open), 19:30 Sri Lanka.
+    let at = Utc.with_ymd_and_hms(2026, 10, 23, 14, 0, 0).unwrap();
+    let mut r = routes("Market Closed");
+    chart_routes(&mut r);
+    r.insert("time_series", us_daily_uptrend());
+    r.insert(
+        "quote",
+        json!({"AAPL": us_quote("AAPL", 126.0, 124.0, at, true),
+               "MSFT": us_quote("MSFT", 100.0, 99.0, at, true)})
+        .to_string(),
+    );
+    r.insert("symbol_search", fixture("twelve-search"));
+    let h = Harness::with_routes(r, at).await;
+
+    // Nothing happens without a key.
+    let wl = h.call("create_watch_list", json!({"name": "US"})).await;
+    for sym in ["AAPL.US", "MSFT.US"] {
+        h.call("add_to_watch_list", json!({"id": wl["id"], "symbol": sym}))
+            .await;
+    }
+    h.call("refresh", Value::Null).await;
+    assert_eq!(h.call("us_settings", Value::Null).await["used_today"], 0);
+
+    let st = h
+        .call("set_us_key", json!({"api_key": " test-key-1234 "}))
+        .await;
+    assert_eq!(st["has_key"], true);
+    assert_eq!(st["key_hint"], "…1234");
+
+    let fired = h.svc.run_check().await.unwrap();
+    let quotes = h.call("quotes", Value::Null).await;
+    let aapl = quotes
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|q| q["symbol"] == "AAPL.US")
+        .expect("US quote in the list");
+    assert_eq!(aapl["last"], "126.0");
+    // Two history downloads and two quotes.
+    let st = h.call("us_settings", Value::Null).await;
+    assert_eq!(st["used_today"], 4, "{st}");
+    assert!(st["error"].is_null(), "{st}");
+
+    // Same structure engine as the CSE: AAPL bounced off a higher low.
+    // Both share the fixture history; MSFT at 100 is below its last higher
+    // low, so only AAPL fires.
+    assert_eq!(fired, 1);
+    let m = h.call("favourite_markers", Value::Null).await;
+    assert_eq!(m["markers"]["AAPL.US"]["status"], "look_now", "{m}");
+    assert_eq!(m["markers"]["MSFT.US"]["status"], "broken", "{m}");
+    let alerts = h.call("alerts_pending", json!({"after_id": 0})).await;
+    assert!(alerts["alerts"][0]["kind"]
+        .as_str()
+        .unwrap()
+        .starts_with("Higher low entry"));
+
+    // A few minutes later the quotes are still fresh: no credits used.
+    h.set_time(at + chrono::Duration::minutes(2));
+    h.call("refresh", Value::Null).await;
+    assert_eq!(h.call("us_settings", Value::Null).await["used_today"], 4);
+
+    // Charts come from the stored history.
+    let chart = h
+        .call("chart", json!({"symbol": "AAPL.US", "range": "1Y"}))
+        .await;
+    assert!(chart["points"].as_array().unwrap().len() > 100);
+    assert_eq!(chart["source"], "twelvedata");
+
+    // Watching only: no paper orders.
+    let err = h
+        .svc
+        .dispatch(
+            "place_order",
+            json!({"order": {"symbol": "AAPL.US", "side": "Buy", "order_type": "Market", "qty": 1, "tif": "Day"}}),
+        )
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("watching"), "{err}");
+
+    let hits = h.call("us_search", json!({"text": "AAPL"})).await;
+    assert_eq!(hits[0]["symbol"], "AAPL.US");
+}
+
+#[tokio::test]
+async fn us_requests_stay_within_eight_a_minute() {
+    let at = Utc.with_ymd_and_hms(2026, 10, 23, 14, 0, 0).unwrap();
+    let mut r = routes("Market Closed");
+    chart_routes(&mut r);
+    r.insert("time_series", us_daily_uptrend());
+    let tickers = ["A", "B", "C", "D", "E", "F"];
+    let batch: serde_json::Map<String, Value> = tickers
+        .iter()
+        .map(|t| (t.to_string(), us_quote(t, 50.0, 49.0, at, true)))
+        .collect();
+    r.insert("quote", Value::Object(batch).to_string());
+    let h = Harness::with_routes(r, at).await;
+    h.call("set_us_key", json!({"api_key": "k"})).await;
+    let wl = h.call("create_watch_list", json!({"name": "US"})).await;
+    for t in tickers {
+        h.call(
+            "add_to_watch_list",
+            json!({"id": wl["id"], "symbol": format!("{t}.US")}),
+        )
+        .await;
+    }
+    // Six history downloads, then only two of six quotes fit this minute.
+    h.call("refresh", Value::Null).await;
+    let st = h.call("us_settings", Value::Null).await;
+    assert_eq!(st["used_today"], 8, "{st}");
+    // The next minute finishes the quotes.
+    h.set_time(at + chrono::Duration::seconds(65));
+    h.call("refresh", Value::Null).await;
+    assert_eq!(h.call("us_settings", Value::Null).await["used_today"], 12);
+    let quotes = h.call("quotes", Value::Null).await;
+    let us = quotes
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|q| q["symbol"].as_str().unwrap().ends_with(".US"))
+        .count();
+    assert_eq!(us, 6);
 }

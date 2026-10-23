@@ -96,25 +96,32 @@ class CheckJob : JobService() {
             js.schedule(job)
         }
 
-        /** Whether a check is due now (Sri Lanka time). */
-        private fun due(ctx: Context): Pair<Boolean, Boolean> {
+        /**
+         * Whether a check is due now: CSE hours (Sri Lanka time) or US hours
+         * (New York time), each plus one check after its close.
+         */
+        private fun due(ctx: Context): Boolean {
             val prefs = ctx.getSharedPreferences(AlertService.PREFS, Context.MODE_PRIVATE)
-            val now = Calendar.getInstance(TimeZone.getTimeZone("Asia/Colombo"))
-            val day = now.get(Calendar.DAY_OF_WEEK)
-            if (day == Calendar.SATURDAY || day == Calendar.SUNDAY) return false to false
-            val minutes = now.get(Calendar.HOUR_OF_DAY) * 60 + now.get(Calendar.MINUTE)
-            val today = "%d-%d".format(now.get(Calendar.YEAR), now.get(Calendar.DAY_OF_YEAR))
-            val trading = minutes in (9 * 60 + 25)..(14 * 60 + 30)
-            val afterClose = minutes in (14 * 60 + 31)..(17 * 60 + 30) &&
-                prefs.getString("closing_check", null) != today
-            if (afterClose) prefs.edit().putString("closing_check", today).apply()
-            return (trading || afterClose) to afterClose
+            fun window(zone: String, open: Int, close: Int, flag: String): Boolean {
+                val now = Calendar.getInstance(TimeZone.getTimeZone(zone))
+                val day = now.get(Calendar.DAY_OF_WEEK)
+                if (day == Calendar.SATURDAY || day == Calendar.SUNDAY) return false
+                val minutes = now.get(Calendar.HOUR_OF_DAY) * 60 + now.get(Calendar.MINUTE)
+                val today = "%d-%d".format(now.get(Calendar.YEAR), now.get(Calendar.DAY_OF_YEAR))
+                if (minutes in (open - 5)..close) return true
+                val afterClose = minutes in (close + 1)..(close + 180) && prefs.getString(flag, null) != today
+                if (afterClose) prefs.edit().putString(flag, today).apply()
+                return afterClose
+            }
+            val cse = window("Asia/Colombo", 9 * 60 + 30, 14 * 60 + 30, "closing_check")
+            val us = window("America/New_York", 9 * 60 + 30, 16 * 60, "closing_check_us")
+            return cse || us
         }
     }
 
     override fun onStartJob(params: JobParameters): Boolean {
         // Live mode checks continuously on its own.
-        if (AlertService.running || !due(this).first) return false
+        if (AlertService.running || !due(this)) return false
         val outbox = Outbox.path(this) ?: return false
         val db = File(File(outbox).parentFile, "cse-trader.sqlite")
         if (!db.exists()) return false

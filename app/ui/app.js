@@ -36,6 +36,10 @@ function fmtBig(v) {
   if (Math.abs(n) >= 1e6) return fmt(n / 1e6) + " mn";
   return fmt(n);
 }
+// US stocks (Twelve Data) carry a ".US" suffix and USD prices.
+const isUs = (sym) => String(sym || "").endsWith(".US");
+const dispSym = (sym) => (isUs(sym) ? sym.slice(0, -3) + " 🇺🇸" : sym);
+const money = (sym, v) => (isUs(sym) ? "$" : "") + fmt(v);
 const dir = (v) => (num(v) > 0 ? "up" : num(v) < 0 ? "down" : "flat");
 const signed = (v, dp = 2) => (num(v) > 0 ? "+" : "") + fmt(v, dp);
 const pct = (v) => signed(v) + "%";
@@ -257,6 +261,7 @@ async function renderWatch() {
       <select id="wl-select">${opts}</select>
       <button class="btn ghost small" id="wl-new">+ List</button>
       <button class="btn ghost small" id="wl-import">Import</button>
+      <button class="btn ghost small" id="wl-us">+ US</button>
     </div>
     <div class="toolbar">
       <input id="watch-search" placeholder="Search symbol or company" value="${esc(state.watch.filter)}" autocomplete="off">
@@ -271,8 +276,8 @@ async function renderWatch() {
       const why = m && m.label ? `<div class="sub ${MARK[m.status][2]}">${m.status === "broken" || m.status === "breaking_down" ? esc(m.detail) : esc(m.label) + (m.detail ? " · " + esc(m.detail) : "")}</div>` : "";
       return `
       <div class="row" data-symbol="${esc(q.symbol)}">
-        <div><div class="sym">${esc(q.symbol)} ${markBadge(m)}</div><div class="sub">${esc(q.name)}</div>${why}</div>
-        <div class="right"><div class="num">${fmt(q.last)}</div><div class="small muted num">${fmtInt(q.share_volume)}</div></div>
+        <div><div class="sym">${esc(dispSym(q.symbol))} ${markBadge(m)}</div><div class="sub">${esc(q.name)}</div>${why}</div>
+        <div class="right"><div class="num">${money(q.symbol, q.last)}</div><div class="small muted num">${fmtVol(q.share_volume)}</div></div>
         <div class="right"><span class="pill ${dir(q.change)} num">${pct(q.change_pct)}</span></div>
       </div>`;
     }).join("") : `<div class="empty">${!inList ? "No securities match"
@@ -291,6 +296,7 @@ function mountWatch(root) {
   $("#watch-sort", root).onchange = (e) => { state.watch.sort = e.target.value; prefSet("watchSort", state.watch.sort); render(); };
   $("#wl-select", root).onchange = (e) => { state.watch.list = e.target.value; prefSet("watchList", state.watch.list); render(); };
   $("#wl-import", root).onclick = () => openImport();
+  $("#wl-us", root).onclick = () => attempt(openUsSearch);
   $$("[data-mark]", root).forEach((b) => (b.onclick = () => { state.watch.mark = b.dataset.mark; render(); }));
   $("#wl-new", root).onclick = async () => {
     const name = prompt("Watch list name");
@@ -548,13 +554,14 @@ async function openQuote(symbol) {
     try { alertsView = await call("alerts"); fav = alertsView.favourites.find((f) => f.symbol === symbol); } catch { /* optional */ }
   }
   const field = (k, v) => `<div class="k">${k}</div><div class="v">${v}</div>`;
+  const us = isUs(symbol);
   openSheet(`
-    <div class="sheet-head"><h3>${esc(q.symbol)}</h3>
+    <div class="sheet-head"><h3>${esc(dispSym(q.symbol))}</h3>
       <div><button class="icon-btn" id="q-fav" title="Add to watch list">${inList ? "★" : "☆"}</button>
       <button class="icon-btn" data-close aria-label="Close">✕</button></div></div>
     <div class="muted small">${esc(q.name)}</div>
     <div class="quote-head" style="margin-top:8px">
-      <div class="last num">${fmt(q.last)}</div>
+      <div class="last num">${money(q.symbol, q.last)}</div>
       <div class="right"><span class="pill ${dir(q.change)} num">${signed(q.change)} (${pct(q.change_pct)})</span></div>
     </div>
     <div class="chart-box" id="q-chart"></div>
@@ -563,9 +570,10 @@ async function openQuote(symbol) {
     <div class="card" style="margin-top:12px"><div class="kv">
       ${field("Open", fmt(q.open))}${field("High", fmt(q.high))}${field("Low", fmt(q.low))}
       ${field("Prev. close", fmt(q.prev_close))}${field("Volume", fmtInt(q.share_volume))}
-      ${field("Trades", fmtInt(q.trades))}${field("Turnover", fmt(q.turnover))}
+      ${us ? "" : field("Trades", fmtInt(q.trades)) + field("Turnover", fmt(q.turnover))}
       ${field("Last trade", timeStr(q.last_traded_at))}
     </div></div>
+    ${us ? `<p class="small muted">US stock${data.us && data.us.exchange ? " · " + esc(data.us.exchange) : ""} · prices in USD from Twelve Data · watching and alerts only${data.us ? (data.us.market_open ? " · market open" : " · market closed") : ""}</p>` : `
     <div class="card" style="margin-top:10px"><div class="kv">
       ${field("Paper holding", fmtInt(data.held))}${field("Available to sell", fmtInt(data.available_to_sell))}
       ${field("Pending buy / sell", fmtInt(data.pending_buy) + " / " + fmtInt(data.pending_sell))}
@@ -573,14 +581,16 @@ async function openQuote(symbol) {
     <div class="btn-row">
       <button class="btn buy" id="q-buy">Buy</button>
       <button class="btn sell" id="q-sell">Sell</button>
-    </div>
+    </div>`}
     <div class="btn-row"><button class="btn ghost" id="q-tv">📈 TradingView chart &amp; tools</button></div>`, (root) => {
     mountChart($("#q-chart", root), symbol, (fav && fav.structure && fav.structure.swings) || []);
     const hist = $("#q-history", root);
     if (hist) hist.ontoggle = () => { if (hist.open && !hist.dataset.loaded) { hist.dataset.loaded = "1"; loadHistory(hist, symbol); } };
-    $("#q-buy", root).onclick = () => { closeSheet(); goTicket(symbol, "Buy", q.last); };
-    $("#q-sell", root).onclick = () => { closeSheet(); goTicket(symbol, "Sell", q.last); };
-    $("#q-tv", root).onclick = () => { closeSheet(); openTradingView(symbol); };
+    if (!us) {
+      $("#q-buy", root).onclick = () => { closeSheet(); goTicket(symbol, "Buy", q.last); };
+      $("#q-sell", root).onclick = () => { closeSheet(); goTicket(symbol, "Sell", q.last); };
+    }
+    $("#q-tv", root).onclick = () => { closeSheet(); openTradingView(symbol, data.us && data.us.exchange); };
     $("#q-fav", root).onclick = () => pickWatchList(symbol);
   });
 }
@@ -603,16 +613,17 @@ async function pickWatchList(symbol) {
 
 // ---------- TradingView ----------
 // CSE symbols on TradingView are prefixed with the exchange code CSELK.
-const tvSymbol = (symbol) => "CSELK:" + symbol;
+// US stocks use their own exchange (NASDAQ, NYSE).
+const tvSymbol = (symbol, exchange) => (isUs(symbol) ? `${exchange || "NASDAQ"}:${symbol.slice(0, -3)}` : "CSELK:" + symbol);
 function openExternal(url) {
   if (window.__TAURI__) return window.__TAURI__.core.invoke("plugin:opener|open_url", { url });
   window.open(url, "_blank", "noopener");
 }
-function openTradingView(symbol) {
+function openTradingView(symbol, exchange) {
   const overlay = $("#tv");
-  $("#tv-title").textContent = symbol;
+  $("#tv-title").textContent = dispSym(symbol);
   $("#tv-open").onclick = () =>
-    attempt(() => openExternal("https://www.tradingview.com/chart/?symbol=" + encodeURIComponent(tvSymbol(symbol))));
+    attempt(() => openExternal("https://www.tradingview.com/chart/?symbol=" + encodeURIComponent(tvSymbol(symbol, exchange))));
   const host = $("#tv-host");
   host.innerHTML = `<div class="tradingview-widget-container" style="height:100%;width:100%">
     <div class="tradingview-widget-container__widget" style="height:100%;width:100%"></div></div>`;
@@ -621,7 +632,7 @@ function openTradingView(symbol) {
   script.async = true;
   script.textContent = JSON.stringify({
     autosize: true,
-    symbol: tvSymbol(symbol),
+    symbol: tvSymbol(symbol, exchange),
     interval: "D",
     timezone: "Asia/Colombo",
     theme: "dark",
@@ -975,7 +986,7 @@ async function checkAlerts() {
   if (lastAlertId === null) { lastAlertId = r.latest_id; prefSet("lastAlertId", lastAlertId); return; }
   const bridge = bgBridge();
   for (const a of r.alerts) {
-    const title = `${a.symbol.replace(/\.N0000$/, "")} · ${a.kind}`;
+    const title = `${a.symbol.replace(/\.(N0000|US)$/, "")} · ${a.kind}`;
     toast(`🔔 ${title}: ${a.message}`);
     if (!bridge && "Notification" in window && Notification.permission === "granted") {
       try { new Notification(title, { body: a.message }); } catch { /* ignore */ }
@@ -1121,8 +1132,8 @@ function favouriteCard(f, v) {
   }
   return `<div class="card fav-card">
     <div class="fav-head" data-symbol="${esc(f.symbol)}">
-      <div><b>${esc(f.symbol)}</b><div class="small muted">${esc(f.name || "")}</div></div>
-      <div class="right"><div class="num">${fmt(f.price)}</div><div class="small num ${dir(f.change_pct)}">${f.change_pct != null ? pct(f.change_pct) : ""}</div></div>
+      <div><b>${esc(dispSym(f.symbol))}</b><div class="small muted">${esc(f.name || "")}</div></div>
+      <div class="right"><div class="num">${money(f.symbol, f.price)}</div><div class="small num ${dir(f.change_pct)}">${f.change_pct != null ? pct(f.change_pct) : ""}</div></div>
     </div>
     ${structureCard(f, v)}
     ${body}
@@ -1318,9 +1329,49 @@ async function showLastCrash() {
     <p class="muted small">Copy this and send it to get it fixed.</p><textarea readonly>${esc(text)}</textarea>`);
 }
 
+// ---------- US stocks ----------
+async function openUsSearch() {
+  const us = await call("us_settings");
+  if (!us.has_key) { toast("Add your free Twelve Data API key in Settings first"); return openSettings(); }
+  if (!watchLists.length) { await call("create_watch_list", { name: "Favourites" }); await loadWatchLists(); }
+  const wl = watchLists.find((w) => String(w.id) === String(state.watch.list)) || watchLists[0];
+  openSheet(`<div class="sheet-head"><h3>Add US stock</h3><button class="icon-btn" data-close>✕</button></div>
+    <div class="toolbar"><input id="us-q" placeholder="Ticker or name, e.g. AAPL or Microsoft" autocomplete="off">
+      <button class="btn primary small" id="us-go">Search</button></div>
+    <div id="us-res" class="list"><div class="empty small">Adds to ★ ${esc(wl.name)}. Prices in USD; watching and alerts only.</div></div>
+    <p class="small muted">Twelve Data allows 8 requests a minute: prices for many new stocks fill in over a few minutes.</p>`, (sh) => {
+    const go = async () => {
+      const text = $("#us-q", sh).value.trim();
+      if (!text) return;
+      const res = $("#us-res", sh);
+      res.innerHTML = `<div class="empty small">Searching…</div>`;
+      try {
+        const hits = await call("us_search", { text });
+        await loadWatchLists();
+        const list = watchLists.find((w) => w.id === wl.id) || wl;
+        res.innerHTML = hits.length ? hits.map((h) => {
+          const added = list.symbols.includes(h.symbol);
+          return `<div class="row" style="cursor:default"><div><b>${esc(h.ticker)}</b> <span class="small muted">${esc(h.exchange)}</span>
+            <div class="sub">${esc(h.name)} · ${esc(h.kind)}</div></div><div></div>
+            <button class="btn small ${added ? "ghost" : "primary"}" data-add="${esc(h.symbol)}" ${added ? "disabled" : ""}>${added ? "Added ✓" : "Add"}</button></div>`;
+        }).join("") : `<div class="empty small">No US stocks match “${esc(text)}”.</div>`;
+        $$("[data-add]", res).forEach((b) => (b.onclick = async () => {
+          await attempt(() => call("add_to_watch_list", { id: wl.id, symbol: b.dataset.add }), `Added ${b.dataset.add.slice(0, -3)}`);
+          b.textContent = "Added ✓"; b.disabled = true; b.classList.replace("primary", "ghost");
+          await loadWatchLists();
+          call("refresh").then(poll).catch(() => {});
+        }));
+      } catch (e) { res.innerHTML = `<div class="empty small">${esc(e.message || e)}</div>`; }
+    };
+    $("#us-go", sh).onclick = go;
+    $("#us-q", sh).onkeydown = (e) => { if (e.key === "Enter") go(); };
+    $("#us-q", sh).focus();
+  });
+}
+
 // ---------- Settings ----------
 async function openSettings() {
-  const [settings, account] = await Promise.all([call("settings"), call("account")]);
+  const [settings, account, us] = await Promise.all([call("settings"), call("account"), call("us_settings")]);
   const fees = settings.fees.components;
   const bands = settings.ticks.bands;
   openSheet(`
@@ -1333,6 +1384,11 @@ async function openSettings() {
     ${bands.map((b, i) => `<div class="grid2" style="margin-bottom:6px">
       <div><label>From price</label><input data-band-from="${i}" type="number" step="0.01" value="${esc(b.from)}"></div>
       <div><label>Tick</label><input data-band-tick="${i}" type="number" step="0.01" value="${esc(b.tick)}"></div></div>`).join("")}
+    <h2>US stocks (Twelve Data)</h2>
+    <p class="muted small">A free key from twelvedata.com gives real-time US prices (8 requests a minute, 800 a day). It is stored only on this phone.</p>
+    <input id="us-key" type="password" autocomplete="off" placeholder="${us.has_key ? "Key saved " + esc(us.key_hint) + " — paste to replace" : "Paste your Twelve Data API key"}">
+    <div class="btn-row"><button class="btn small primary" id="us-save">Save key</button>${us.has_key ? `<button class="btn small ghost" id="us-clear">Remove key</button>` : ""}</div>
+    <p class="muted small">Used today: ${us.used_today} / ${us.day_limit}${us.error ? ` · <span class="down">${esc(us.error)}</span>` : ""}</p>
     <h2>Market holidays</h2>
     <textarea id="holidays" placeholder="YYYY-MM-DD, one per line">${esc(settings.calendar.holidays.join("\n"))}</textarea>
     <div class="btn-row"><button class="btn primary" id="set-save">Save settings</button></div>
@@ -1344,6 +1400,14 @@ async function openSettings() {
       const total = $$("[data-fee-rate]", s).reduce((t, x) => t + (num(x.value) || 0), 0);
       $("#fee-total", s).textContent = fmt(total, 3) + "%";
     }));
+    $("#us-save", s).onclick = async () => {
+      const api_key = $("#us-key", s).value.trim();
+      if (!api_key) return toast("Paste the key first", true);
+      await attempt(() => call("set_us_key", { api_key }), "Twelve Data key saved");
+      closeSheet(); call("refresh").then(poll).catch(() => {});
+    };
+    const clr = $("#us-clear", s);
+    if (clr) clr.onclick = async () => { await attempt(() => call("set_us_key", { api_key: "" }), "Key removed"); closeSheet(); };
     $("#set-save", s).onclick = async () => {
       settings.fees.components = fees.map((f, i) => ({
         name: $(`[data-fee-name="${i}"]`, s).value,

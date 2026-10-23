@@ -145,3 +145,22 @@ fn company_quote_before_first_trade_shows_previous_close() {
     assert_eq!(q.last.to_string(), "46.6");
     assert!(q.change.is_zero() && q.change_pct.is_zero());
 }
+
+#[test]
+fn twelve_data_replies() {
+    use cse_client::twelve;
+    let one = twelve::map_quotes(&fixture("twelve-quote1"), &["AAPL"]);
+    assert_eq!(one[0].quote.symbol, "AAPL.US");
+    assert_eq!(one[0].quote.name, "Apple Inc.");
+    assert!(!one[0].market_open);
+    let two = twelve::map_quotes(&fixture("twelve-quote2"), &["AAPL", "MSFT"]);
+    assert_eq!(two.len(), 2);
+    assert!(two[1].quote.change < rust_decimal::Decimal::ZERO);
+    let daily = twelve::map_daily(&fixture("twelve-daily"));
+    assert_eq!(daily.len(), 3);
+    assert!(daily[0].at < daily[2].at);
+    assert_eq!(twelve::map_intraday(&fixture("twelve-intraday")).len(), 3);
+    let hits = twelve::map_search(&fixture("twelve-search"), "AAPL");
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].name, "Apple Inc.");
+}

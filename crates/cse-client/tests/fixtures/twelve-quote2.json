@@ -1,0 +1,60 @@
+{
+    "AAPL": {
+        "symbol": "AAPL",
+        "name": "Apple Inc.",
+        "exchange": "NASDAQ",
+        "mic_code": "XNGS",
+        "currency": "USD",
+        "datetime": "2026-10-22",
+        "timestamp": 1792675800,
+        "last_quote_at": 1792699140,
+        "open": "344.93500",
+        "high": "348.35999",
+        "low": "342.28000",
+        "close": "348.22000",
+        "volume": "46659852",
+        "previous_close": "343.98999",
+        "change": "4.23001",
+        "percent_change": "1.22969",
+        "average_volume": "40523895",
+        "is_market_open": false,
+        "fifty_two_week": {
+            "low": "243.42000",
+            "high": "348.35999",
+            "low_change": "104.80000",
+            "high_change": "-0.13998413",
+            "low_change_percent": "43.053161",
+            "high_change_percent": "-0.040183757",
+            "range": "243.419998 - 348.359985"
+        }
+    },
+    "MSFT": {
+        "symbol": "MSFT",
+        "name": "Microsoft Corporation Common Stock",
+        "exchange": "NASDAQ",
+        "mic_code": "XNGS",
+        "currency": "USD",
+        "datetime": "2026-10-22",
+        "timestamp": 1792675800,
+        "last_quote_at": 1792699140,
+        "open": "532.70001",
+        "high": "533.59601",
+        "low": "520.29999",
+        "close": "521.080017",
+        "volume": "21072346",
+        "previous_close": "532.95001",
+        "change": "-11.87000",
+        "percent_change": "-2.22722",
+        "average_volume": "19957205",
+        "is_market_open": false,
+        "fifty_two_week": {
+            "low": "349.20001",
+            "high": "553.71997",
+            "low_change": "171.88000",
+            "high_change": "-32.63995",
+            "low_change_percent": "49.22108",
+            "high_change_percent": "-5.89467",
+            "range": "349.200012 - 553.719971"
+        }
+    }
+}

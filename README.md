@@ -111,7 +111,24 @@ Android asks.
 
 Signals are prompts to look at a stock, not buy recommendations.
 
-## Development
+## US stocks (watching and alerts)
+
+US stocks come from [Twelve Data](https://twelvedata.com) with your own free
+API key (Settings → US stocks; it is stored only on the phone). Tap **+ US**
+on the Watch tab, search by ticker or name, and add stocks to any watch
+list. They show as e.g. "AAPL 🇺🇸" with USD prices and get the same market
+structure markers, alerts, history and charts as CSE stocks. Paper orders
+are for CSE stocks only.
+
+The free plan allows 8 requests a minute and 800 a day, and the app keeps
+within that: one daily-history download per stock per New York trading day,
+and quotes every 5 minutes during the US session (09:30–16:00 New York,
+7:00 pm–1:30 am Sri Lanka time in summer, 8:00 pm–2:30 am in winter) plus
+one after the close, in batches of 8. About 20 stocks use roughly 300
+requests a day. Timed background checks also run during US hours. Settings
+shows how many requests were used today.
+
+
 
 ```sh
 cargo test           # all unit tests

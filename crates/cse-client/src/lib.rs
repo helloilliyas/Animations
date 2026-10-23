@@ -6,6 +6,7 @@
 //! [`CseClient::raw`].
 
 pub mod parse;
+pub mod twelve;
 
 use std::time::Duration;
 
@@ -27,6 +28,9 @@ pub enum Error {
     Json(#[from] serde_json::Error),
     #[error("missing field (tried: {0})")]
     MissingField(String),
+    /// An error reported in the body of a price provider's reply.
+    #[error("{message} (code {code})")]
+    Provider { code: u16, message: String },
 }
 
 /// A CSE data feed. Each is an HTTP POST to `<base>/<path>` with form fields.

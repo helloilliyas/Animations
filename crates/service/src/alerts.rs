@@ -8,6 +8,7 @@ use std::io::Write;
 use std::path::PathBuf;
 
 use chrono::{DateTime, Duration, NaiveDate, Utc};
+use cse_core::us_market::is_us;
 use cse_core::{ChartRange, MarketPhase};
 use cse_signals::structure::{self, Break, Status, Structure};
 use cse_signals::{
@@ -28,7 +29,7 @@ pub(crate) const ALERTS_KEY: &str = "alerts";
 pub(crate) const SYNCED_KEY: &str = "synced_days";
 /// Alert settings format; v2 made market structure the default method.
 const BOOK_VERSION: u32 = 2;
-const HISTORY_LIMIT: usize = 200;
+pub(crate) const HISTORY_LIMIT: usize = 200;
 /// Daily histories fetched per refresh, to spread requests out.
 const SYNCS_PER_REFRESH: usize = 10;
 const UPTREND_BROKEN: &str = "Uptrend broken";
@@ -183,14 +184,14 @@ impl AlertBook {
 /// Per-stock analysis, recomputed once a day (intraday part more often).
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Analysis {
-    day: Option<NaiveDate>,
+    pub(crate) day: Option<NaiveDate>,
     levels: Option<DailyLevels>,
     records: Vec<TrackRecord>,
     history_days: usize,
     intraday: Option<IntradayLevels>,
     intraday_at: Option<DateTime<Utc>>,
     intraday_triggers: Vec<Trigger>,
-    structure: Option<Structure>,
+    pub(crate) structure: Option<Structure>,
     structure_records: Vec<TrackRecord>,
     error: Option<String>,
 }
@@ -229,7 +230,7 @@ pub(crate) fn to_f64(d: Decimal) -> f64 {
 }
 
 impl AppService {
-    fn favourites(&self) -> Result<BTreeSet<String>> {
+    pub(crate) fn favourites(&self) -> Result<BTreeSet<String>> {
         Ok(self
             .store
             .lock()
@@ -264,9 +265,50 @@ impl AppService {
             .collect())
     }
 
-    /// Called after every market refresh.
+    /// Levels, structure, track records and history for one stock from its
+    /// completed daily bars (before `today`).
+    pub(crate) fn build_analysis(
+        &self,
+        sym: &str,
+        today: NaiveDate,
+        params: &Params,
+        book: &AlertBook,
+        error: Option<String>,
+    ) -> Result<Analysis> {
+        let mut a = Analysis {
+            day: Some(today),
+            error,
+            ..Analysis::default()
+        };
+        let bars = self.daily_bars(sym, today)?;
+        a.history_days = bars.len();
+        a.levels = daily_levels(&bars, params);
+        a.records = track_record(&bars, params);
+        a.structure = structure::analyze(&bars, params);
+        a.structure_records = structure::track_record(&bars, params, &SignalKind::STRUCTURE);
+        // History problems must not stop alerts.
+        let _ = self.record_history(sym, &bars, params, &book.enabled_structure());
+        if a.levels.is_none() && a.error.is_none() {
+            a.error = Some(format!("Not enough history yet ({} days)", bars.len()));
+        }
+        Ok(a)
+    }
+
+    /// Saves the book and sends new alerts to the log and the outbox.
+    pub(crate) fn publish_alerts(&self, book: &AlertBook, fired: &[FiredAlert]) -> Result<()> {
+        self.save_book(book)?;
+        self.log_alerts(fired)?;
+        self.write_outbox(fired);
+        Ok(())
+    }
+
+    /// Called after every market refresh (CSE stocks; US ones are in `us`).
     pub(crate) async fn update_alerts(&self) -> Result<()> {
-        let favourites = self.favourites()?;
+        let favourites: BTreeSet<String> = self
+            .favourites()?
+            .into_iter()
+            .filter(|s| !is_us(s))
+            .collect();
         let now = self.now();
         let today = lk_day(now);
         self.look_up_missing(&favourites, today).await;
@@ -306,17 +348,7 @@ impl AppService {
                     Err(e) => a.error = Some(e.to_string()),
                 }
             }
-            let bars = self.daily_bars(&sym, today)?;
-            a.history_days = bars.len();
-            a.levels = daily_levels(&bars, &params);
-            a.records = track_record(&bars, &params);
-            a.structure = structure::analyze(&bars, &params);
-            a.structure_records = structure::track_record(&bars, &params, &SignalKind::STRUCTURE);
-            // History problems must not stop alerts.
-            let _ = self.record_history(&sym, &bars, &params, &book.enabled_structure());
-            if a.levels.is_none() && a.error.is_none() {
-                a.error = Some(format!("Not enough history yet ({} days)", bars.len()));
-            }
+            let a = self.build_analysis(&sym, today, &params, &book, a.error)?;
             self.state.write().unwrap().analysis.insert(sym, a);
         }
 
@@ -426,83 +458,7 @@ impl AppService {
                 }
                 // Market structure: each setup fires once per swing.
                 if let Some(st) = &a.structure {
-                    let view =
-                        structure::evaluate(st, Some(&live), &params, &book.enabled_structure());
-                    let star = if view.weekly_star { " ⭐" } else { "" };
-                    for x in view.setups.iter().filter(|x| x.plan.passes) {
-                        let ready = !x.triggered && x.distance_pct <= params.near_pct;
-                        if !(x.triggered || (ready && book.notify_get_ready)) {
-                            continue;
-                        }
-                        let key = format!(
-                            "{sym}|{:?}|{}|{}",
-                            x.kind,
-                            if x.triggered { "go" } else { "ready" },
-                            st.swing_key
-                        );
-                        if book.last_fired.contains_key(&key) {
-                            continue;
-                        }
-                        book.last_fired.insert(key, now);
-                        let id = book.take_id();
-                        let (kind, message) = if x.triggered {
-                            (
-                                format!("{}{star}", x.kind.label()),
-                                format!(
-                                    "{} · entry {:.2}, stop {:.2}, target {:.2} ({:.1}x)",
-                                    x.note,
-                                    x.plan.entry,
-                                    x.plan.stop,
-                                    x.plan.target,
-                                    x.plan.reward_risk
-                                ),
-                            )
-                        } else {
-                            (
-                                format!("Get ready: {}{star}", x.kind.label()),
-                                format!(
-                                    "{:.1}% below the {} trigger {:.2}",
-                                    x.distance_pct,
-                                    x.kind.label(),
-                                    x.trigger
-                                ),
-                            )
-                        };
-                        fired.push(FiredAlert {
-                            id,
-                            at: now,
-                            symbol: sym.clone(),
-                            kind,
-                            level: x.trigger,
-                            price,
-                            message,
-                            plan: x.triggered.then_some(AlertPlan {
-                                entry: x.plan.entry,
-                                stop: x.plan.stop,
-                                target: x.plan.target,
-                            }),
-                        });
-                    }
-                    // A favourite losing its uptrend, once per swing (optional).
-                    if book.notify_broken && view.breaking == Some(Break::UptrendBroken) {
-                        let key = format!("{sym}|Broken|{}", st.swing_key);
-                        if let std::collections::btree_map::Entry::Vacant(e) =
-                            book.last_fired.entry(key)
-                        {
-                            e.insert(now);
-                            let id = book.take_id();
-                            fired.push(FiredAlert {
-                                id,
-                                at: now,
-                                symbol: sym.clone(),
-                                kind: UPTREND_BROKEN.into(),
-                                level: st.last_low.unwrap_or(price),
-                                price,
-                                message: view.break_note.clone().unwrap_or_default(),
-                                plan: None,
-                            });
-                        }
-                    }
+                    fire_structure(&mut book, sym, st, &live, &params, now, &mut fired);
                 }
             }
             triggers.retain(|t| book.signal_on(t.kind));
@@ -579,10 +535,7 @@ impl AppService {
         book.history.drain(..excess);
         s.alerts = book.clone();
         drop(guard);
-        self.save_book(&book)?;
-        self.log_alerts(&fired)?;
-        self.write_outbox(&fired);
-        Ok(())
+        self.publish_alerts(&book, &fired)
     }
 
     /// Fetches quotes for favourites that are not in today's price list
@@ -739,7 +692,7 @@ impl AppService {
         let rows: Vec<Value> = favourites
             .iter()
             .map(|sym| {
-                let q = s.market.quotes.get(sym);
+                let q = s.quote(sym);
                 let a = s.analysis.get(sym);
                 json!({
                     "symbol": sym,
@@ -789,9 +742,96 @@ impl AppService {
     }
 }
 
-/// `ABAN.N0000` -> `ABAN` for notifications.
+/// Structure alerts for one stock at its live price: setups (once per swing)
+/// and, if wanted, an uptrend breaking.
+pub(crate) fn fire_structure(
+    book: &mut AlertBook,
+    sym: &str,
+    st: &Structure,
+    live: &Live,
+    params: &Params,
+    now: DateTime<Utc>,
+    fired: &mut Vec<FiredAlert>,
+) {
+    let price = live.price;
+    let view = structure::evaluate(st, Some(live), params, &book.enabled_structure());
+    let star = if view.weekly_star { " ⭐" } else { "" };
+    for x in view.setups.iter().filter(|x| x.plan.passes) {
+        let ready = !x.triggered && x.distance_pct <= params.near_pct;
+        if !(x.triggered || (ready && book.notify_get_ready)) {
+            continue;
+        }
+        let key = format!(
+            "{sym}|{:?}|{}|{}",
+            x.kind,
+            if x.triggered { "go" } else { "ready" },
+            st.swing_key
+        );
+        if book.last_fired.contains_key(&key) {
+            continue;
+        }
+        book.last_fired.insert(key, now);
+        let id = book.take_id();
+        let (kind, message) = if x.triggered {
+            (
+                format!("{}{star}", x.kind.label()),
+                format!(
+                    "{} · entry {:.2}, stop {:.2}, target {:.2} ({:.1}x)",
+                    x.note, x.plan.entry, x.plan.stop, x.plan.target, x.plan.reward_risk
+                ),
+            )
+        } else {
+            (
+                format!("Get ready: {}{star}", x.kind.label()),
+                format!(
+                    "{:.1}% below the {} trigger {:.2}",
+                    x.distance_pct,
+                    x.kind.label(),
+                    x.trigger
+                ),
+            )
+        };
+        fired.push(FiredAlert {
+            id,
+            at: now,
+            symbol: sym.to_owned(),
+            kind,
+            level: x.trigger,
+            price,
+            message,
+            plan: x.triggered.then_some(AlertPlan {
+                entry: x.plan.entry,
+                stop: x.plan.stop,
+                target: x.plan.target,
+            }),
+        });
+    }
+    // A favourite losing its uptrend, once per swing (optional).
+    if book.notify_broken && view.breaking == Some(Break::UptrendBroken) {
+        let key = format!("{sym}|Broken|{}", st.swing_key);
+        if let std::collections::btree_map::Entry::Vacant(e) = book.last_fired.entry(key) {
+            e.insert(now);
+            let id = book.take_id();
+            fired.push(FiredAlert {
+                id,
+                at: now,
+                symbol: sym.to_owned(),
+                kind: UPTREND_BROKEN.into(),
+                level: st.last_low.unwrap_or(price),
+                price,
+                message: view.break_note.clone().unwrap_or_default(),
+                plan: None,
+            });
+        }
+    }
+}
+
+/// `ABAN.N0000` -> `ABAN`, `AAPL.US` -> `AAPL` for notifications.
 fn short(symbol: &str) -> &str {
-    symbol.strip_suffix(".N0000").unwrap_or(symbol)
+    symbol
+        .strip_suffix(".N0000")
+        .or_else(|| symbol.strip_suffix(cse_core::us_market::US_SUFFIX))
+        .unwrap_or(symbol)
 }
 
 /// Today's figures from a quote, for evaluating levels outside the refresh.
@@ -831,7 +871,7 @@ impl AppService {
         let mut markers = serde_json::Map::new();
         for sym in &favourites {
             let a = s.analysis.get(sym);
-            let q = s.market.quotes.get(sym);
+            let q = s.quote(sym);
             let marker = match a.and_then(|a| a.structure.as_ref()) {
                 None => json!({ "status": if a.is_none() { "pending" } else { "no_data" } }),
                 Some(st) => {
@@ -918,6 +958,15 @@ impl AppService {
     pub async fn run_check(&self) -> Result<usize> {
         let before = self.state.read().unwrap().alerts.next_id;
         self.refresh().await?;
+        // US quotes come 8 a minute: finish the batch within this check.
+        for _ in 0..3 {
+            if !self.us_deferred() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(62)).await;
+            let _one = self.refreshing.lock().await;
+            let _ = self.update_us().await;
+        }
         let after = self.state.read().unwrap().alerts.next_id;
         Ok((after - before) as usize)
     }
