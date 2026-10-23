@@ -112,18 +112,71 @@ fn row_text(t: &str, known: &HashSet<String>) -> Option<Captured> {
         return None;
     }
     let symbol = symbol_of(cells[0], known)?;
-    let qty = cells[1..]
+    let qi = 1 + cells[1..]
         .iter()
-        .find(|c| !c.contains('%') && is_whole(c))
+        .position(|c| !c.contains('%') && is_whole(c))?;
+    let qty = number(cells[qi]).and_then(|q| u64::try_from(q.trunc()).ok())?;
+    // In the Detailed list the price after the quantity is the last price.
+    let last = cells[qi + 1..]
+        .iter()
+        .find(|c| c.contains('.') && !c.contains('%'))
         .and_then(|c| number(c))
-        .and_then(|q| u64::try_from(q.trunc()).ok())?;
+        .filter(|p| *p > Decimal::ZERO);
     Some(Captured {
         symbol,
         qty,
         avg_cost: None,
-        last: None,
+        last,
         confident: true,
     })
+}
+
+/// The average cost in a row of the Summary table (market value, gain/loss,
+/// average cost, last price, gain/loss %, in an unknown order), found by
+/// arithmetic rather than position: the market value is about quantity x
+/// last price, and the average cost x quantity is the market value minus
+/// the gain/loss.
+fn cost_in_row(t: &str, qty: u64, last: Option<Decimal>) -> Option<Decimal> {
+    let nums: Vec<Decimal> = t
+        .split(", ")
+        .skip(1)
+        .filter(|c| !c.contains('%'))
+        .filter_map(number)
+        .collect();
+    let q = Decimal::from(qty);
+    if q.is_zero() {
+        return None;
+    }
+    let one = Decimal::ONE;
+    for (mi, m) in nums.iter().enumerate() {
+        if *m <= Decimal::ZERO {
+            continue;
+        }
+        if let Some(l) = last {
+            let expect = q * l;
+            if (*m - expect).abs() > (expect * Decimal::new(2, 2)).max(one) {
+                continue;
+            }
+        }
+        for (gi, g) in nums.iter().enumerate() {
+            let total = *m - *g;
+            if gi == mi || total <= Decimal::ZERO {
+                continue;
+            }
+            let tol = (total * Decimal::new(5, 3)).max(q * Decimal::new(1, 2));
+            if let Some(x) = nums
+                .iter()
+                .enumerate()
+                .find(|(xi, x)| {
+                    *xi != mi && *xi != gi && **x > Decimal::ZERO && (q * **x - total).abs() <= tol
+                })
+                .map(|(_, x)| *x)
+            {
+                return Some(x);
+            }
+        }
+    }
+    None
 }
 
 /// Holdings in the captured text; each symbol once (scrolled pages repeat).
@@ -137,9 +190,18 @@ pub fn parse_capture(texts: &[String], known: &HashSet<String>) -> Vec<Captured>
                 c.qty = row.qty;
                 c.confident = true;
             }
-            Some(_) => {}
+            Some(c) => c.last = c.last.or(row.last),
             None => out.push(row),
         }
+    }
+    // Costs from the Summary table, checked against quantity and last price.
+    for c in out.iter_mut().filter(|c| c.avg_cost.is_none()) {
+        c.avg_cost = texts
+            .iter()
+            .filter(|t| {
+                t.contains(", ") && symbol_of(t, known).as_deref() == Some(c.symbol.as_str())
+            })
+            .find_map(|t| cost_in_row(t, c.qty, c.last));
     }
     out
 }
@@ -275,6 +337,7 @@ impl AppService {
                     "avg_cost": c.avg_cost,
                     "last": c.last,
                     "confident": c.confident,
+                    "needs_cost": c.avg_cost.is_none() && oq == 0,
                     "ours_qty": oq,
                     "ours_avg": oa.map(|a| a.round_dp(2)),
                     "change": change,
@@ -333,8 +396,13 @@ impl AppService {
                     .or_else(|| last_prices.get(&sym).copied())
                     .unwrap_or(avg0);
                 let mut tx = |side, qty: u64, price: Decimal| {
-                    if qty == 0 || price <= Decimal::ZERO {
+                    if qty == 0 {
                         return Ok::<(), crate::ServiceError>(());
+                    }
+                    if price <= Decimal::ZERO {
+                        return Err(crate::ServiceError::BadArgs(format!(
+                            "No average cost for {sym}: enter it, or use ATrad's last price"
+                        )));
                     }
                     real.add(
                         NewTransaction {
@@ -511,6 +579,41 @@ mod tests {
         assert_eq!((c[1].symbol.as_str(), c[1].qty), ("RHL.N0000", 122206));
         assert_eq!(c[1].avg_cost, Some(dec!(31.2045)));
         assert!(c.iter().all(|x| x.confident));
+    }
+
+    #[test]
+    fn cost_from_the_summary_table() {
+        // Detailed rows, then the Summary tab: market value, gain/loss,
+        // avg. cost, last price, gain/loss % (order not relied on).
+        let texts = t(&[
+            "Symbol",
+            "Quantity",
+            "Last Price",
+            "Holdings %",
+            "Change",
+            "CLND.N0000, 18,085, 5.86%, 44.10, -",
+            "RHL.N0000, 122,206, 39.57%, 34.40, -",
+            "RIL.N0000, 80,000, 25.90%, 19.90, -",
+            "Symbol",
+            "Market Value",
+            "Gain/Loss",
+            "Avg. Cost",
+            "Last Price",
+            "Gain/Loss %",
+            "CLND.N0000, 797,548.50, 31,627.80, 42.35, 44.10, 4.13%",
+            "RHL.N0000, 4,203,886.40, -181,862.38, 35.89, 34.40, -4.15%",
+            "RIL.N0000, 19.90, 1,592,000.00, 0.00, 19.90, 0.00%",
+        ]);
+        let c = parse_capture(&texts, &known());
+        let get = |s: &str| c.iter().find(|x| x.symbol == s).unwrap();
+        assert_eq!(get("CLND.N0000").qty, 18085);
+        assert_eq!(get("CLND.N0000").last, Some(dec!(44.10)));
+        assert_eq!(get("CLND.N0000").avg_cost, Some(dec!(42.35)));
+        assert_eq!(get("RHL.N0000").avg_cost, Some(dec!(35.89)));
+        // Bought at the last price: no gain, cost equals the price.
+        assert_eq!(get("RIL.N0000").avg_cost, Some(dec!(19.90)));
+        // The Summary rows did not change quantities.
+        assert_eq!(get("RHL.N0000").qty, 122206);
     }
 
     #[test]

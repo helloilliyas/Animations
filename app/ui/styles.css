@@ -231,3 +231,5 @@ details summary { cursor: pointer; }
 .sw-date { font-size: 11px; opacity: .75; }
 .sheet-body .row .sub { white-space: normal; max-width: none; }
 .avg-in { margin-top: 6px; padding: 6px 10px; font-size: 13px; }
+.sheet-body label.small { display: flex; align-items: center; gap: 6px; margin: 6px 0 0; color: var(--muted); }
+.sheet-body label.small input[type=checkbox] { width: auto; margin: 0; }

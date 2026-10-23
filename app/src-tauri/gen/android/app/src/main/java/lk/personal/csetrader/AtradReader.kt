@@ -37,8 +37,8 @@ class AtradReader : AccessibilityService() {
     companion object {
         const val PKG = "com.ironone.atrad"
         private const val TIMEOUT_MS = 120_000L
-        /** Readings kept: one per opened row plus scrolled pages. */
-        private const val MAX_PAGES = 80
+        /** Readings kept: scrolled pages of the three portfolio tabs. */
+        private const val MAX_PAGES = 15
         private val SYMBOL = Regex("^[A-Z0-9&]{1,8}\\.[A-Z]\\d{4}$")
 
         @Volatile
@@ -46,8 +46,9 @@ class AtradReader : AccessibilityService() {
         private var startedAt = 0L
         private var signInTapped = false
         private var detailedTapped = false
-        /** Holdings whose row has been opened to show its details. */
-        private val opened = mutableSetOf<String>()
+        /** Portfolio tabs still to read after Detailed. */
+        private val tabsToRead = mutableListOf<String>()
+        private var visitingTab = false
         private var lastTap = 0L
         private val pages = mutableListOf<List<String>>()
 
@@ -71,7 +72,9 @@ class AtradReader : AccessibilityService() {
             startedAt = System.currentTimeMillis()
             signInTapped = false
             detailedTapped = false
-            opened.clear()
+            tabsToRead.clear()
+            visitingTab = false
+            tabsToRead.addAll(listOf("summary", "valuation"))
             order = null
             lastTap = 0L
             pages.clear()
@@ -85,6 +88,8 @@ class AtradReader : AccessibilityService() {
         private var order: Order? = null
         private var orderStage = 0
         private var tabTappedAt = 0L
+        private var selectAt = 0L
+        private var typed = false
 
         fun orderLogFile(ctx: Context) = File(ctx.filesDir, "atrad-order.json")
 
@@ -183,42 +188,31 @@ class AtradReader : AccessibilityService() {
                 }
             }
         }
-        // 3. The holdings: keep what is on screen (with any opened row's
-        //    details), open the next row (its ˅ shows the average cost),
-        //    then scroll for more rows.
-        if (texts.any { isHoldingsLabel(it) }) {
+        // 3. The holdings: keep what is on screen, scroll for more rows,
+        //    then read the Summary and Valuation tabs too (the average cost
+        //    is in one of them; Detailed has quantities).
+        // A tab opened for reading that has no holdings table (a chart):
+        // keep its text and move on.
+        if (visitingTab && texts.none { isHoldingsLabel(it) }) {
+            visitingTab = false
             if (pages.lastOrNull() != texts) pages.add(texts)
-            if (pages.size >= MAX_PAGES) {
-                finish(true, "")
-                return
-            }
-            val next = findSymbol(root) { it !in opened }
-            if (next != null) {
-                opened.add(next.first)
-                if (tap(next.second)) {
-                    lastTap = now
-                    return
-                }
-            }
-            val before = texts
-            if (!scrollForward(root)) {
-                finish(true, "")
-                return
-            }
-            lastTap = now
-            // Nothing new after scrolling: the end of the list.
-            handler.postDelayed({
-                val after = rootInActiveWindow?.let { collect(it) }
-                if (active && after == before && findSymbol(rootInActiveWindow ?: return@postDelayed) { it !in opened } == null) {
-                    finish(true, "")
-                }
-            }, 1500)
+            nextTabOrFinish(now)
             return
         }
-        // A row tap opened another screen: go back and keep what was read.
-        if (opened.isNotEmpty()) {
-            performGlobalAction(GLOBAL_ACTION_BACK)
-            finish(true, "")
+        if (texts.any { isHoldingsLabel(it) }) {
+            visitingTab = false
+            if (pages.lastOrNull() != texts) pages.add(texts)
+            val before = texts
+            if (pages.size < MAX_PAGES && scrollForward(root)) {
+                lastTap = now
+                // Nothing new after scrolling: move on to the next tab.
+                handler.postDelayed({
+                    val after = rootInActiveWindow?.let { collect(it) }
+                    if (active && after == before) nextTabOrFinish(now)
+                }, 1500)
+                return
+            }
+            nextTabOrFinish(now)
             return
         }
         // 4. Find the way there: the Portfolio tab.
@@ -227,53 +221,125 @@ class AtradReader : AccessibilityService() {
     }
 
     /**
-     * Fills the Buy Sell screen: symbol first (picking the matching
-     * suggestion if a list appears), then quantity and price. Never taps a
-     * button on that screen.
+     * Fills ATrad's Buy Sell screen in checked steps, never tapping a button
+     * there (the Buy/Sell switch and the submit button share their words):
+     *
+     * 0. Open Buy Sell. If the stock box (a tap-to-pick selector showing the
+     *    current symbol) is not the order's stock, tap it.
+     * 1. In the selector, type the code and tap the result that is exactly
+     *    the order's symbol.
+     * 2. Back on Buy Sell, check the stock box shows that symbol; only then
+     *    fill quantity and price.
+     * 3. Check ATrad took them: the boxes show them and Order Value equals
+     *    quantity x price. Otherwise warn loudly.
+     *
+     * Any step that cannot be confirmed stops the filling.
      */
     private fun orderStep(root: AccessibilityNodeInfo, texts: List<String>, now: Long, o: Order) {
-        val symbolField = fieldFor(root, listOf("symbol", "security", "stock", "search symbol"))
-        val qtyField = fieldFor(root, listOf("quantity", "qty", "order qty", "order quantity"))
-        val priceField = fieldFor(root, listOf("price", "limit price", "order price"))
-        val sure = qtyField != null && priceField != null && qtyField != priceField
-        if (!sure) {
-            if (tabTappedAt == 0L) {
-                find(root) { isWord(it, "buy sell", "buy/sell", "buysell", "buy & sell") }?.let {
-                    if (tap(it)) {
-                        tabTappedAt = now
-                        lastTap = now
-                    }
-                }
-            } else if (now - tabTappedAt > 15_000) {
-                finishOrder("Opened Buy Sell. The order is copied — enter it and confirm in ATrad.", texts)
-            }
-            return
-        }
+        val onOrderScreen = texts.any { isWord(it, "buying power", "order value") }
+        val shown = findSymbol(root) { true }
         when (orderStage) {
             0 -> {
-                orderStage = 1
-                if (symbolField != null && symbolField != qtyField && symbolField != priceField) {
-                    setText(symbolField, o.ticker)
+                if (!onOrderScreen) {
+                    if (tabTappedAt == 0L) {
+                        find(root) { isWord(it, "buy sell", "buy/sell", "buysell", "buy & sell") }?.let {
+                            if (tap(it)) {
+                                tabTappedAt = now
+                                lastTap = now
+                            }
+                        }
+                    } else if (now - tabTappedAt > 15_000) {
+                        finishOrder("Could not open Buy Sell. The order is copied — enter it yourself.", texts)
+                    }
+                    return
+                }
+                if (shown?.first == o.symbol) {
+                    orderStage = 2
+                } else if (shown != null && tap(shown.second)) {
+                    orderStage = 1
+                    typed = false
+                    selectAt = now
                     lastTap = now
+                    return
+                } else {
+                    finishOrder("Could not open the stock selector — choose ${o.symbol} yourself. Nothing was filled.", texts)
                     return
                 }
             }
             1 -> {
-                orderStage = 2
-                // A suggestion list: pick the exact symbol (not the field itself).
-                find(root) { it.equals(o.symbol, true) || it.equals(o.ticker, true) || it.startsWith(o.symbol + " ", true) }
-                    ?.takeIf { !it.isEditable }
-                    ?.let {
-                        if (tap(it)) {
-                            lastTap = now
-                            return
-                        }
+                if (onOrderScreen) {
+                    if (shown?.first == o.symbol) {
+                        orderStage = 2
+                    } else if (now - selectAt > 4_000) {
+                        finishOrder("Could not select ${o.symbol} — choose it yourself. Nothing was filled.", texts)
+                        return
+                    } else {
+                        return
                     }
+                } else {
+                    if (now - selectAt > 20_000) {
+                        finishOrder("Could not find ${o.symbol} in ATrad's search — choose it yourself. Nothing was filled.", texts)
+                        return
+                    }
+                    if (!typed) {
+                        val box = firstEditable(root) ?: return
+                        setText(box, o.ticker)
+                        typed = true
+                        lastTap = now
+                        return
+                    }
+                    // Only the exact symbol, never a similar one.
+                    find(root) { it.trim().equals(o.symbol, true) }?.takeIf { !it.isEditable }?.let {
+                        if (tap(it)) lastTap = now
+                    }
+                    return
+                }
             }
         }
-        setText(qtyField!!, o.qty)
-        setText(priceField!!, o.price)
-        finishOrder("Filled: ${o.side.uppercase()} ${o.ticker} ${o.qty} @ ${o.price}. Check Buy/Sell and the details, then confirm in ATrad.", collect(root))
+        if (orderStage == 2) {
+            if (shown?.first != o.symbol) {
+                finishOrder("ATrad shows ${shown?.first ?: "another stock"}, not ${o.symbol}. Nothing was filled.", texts)
+                return
+            }
+            val qtyField = fieldFor(root, listOf("quantity", "qty", "order qty", "order quantity"))
+            val priceField = fieldFor(root, listOf("price", "limit price", "order price"))
+            if (qtyField == null || priceField == null || qtyField == priceField) {
+                finishOrder("Selected ${o.symbol}, but could not tell the quantity and price boxes apart — enter them yourself.", texts)
+                return
+            }
+            setText(qtyField, o.qty)
+            setText(priceField, o.price)
+            orderStage = 3
+            lastTap = now
+            return
+        }
+        // 3. Verify what ATrad shows.
+        val qtyShown = fieldFor(root, listOf("quantity", "qty", "order qty", "order quantity"))?.text?.toString()
+        val priceShown = fieldFor(root, listOf("price", "limit price", "order price"))?.text?.toString()
+        val value = texts.indexOfFirst { isWord(it, "order value") }.takeIf { it >= 0 }
+            ?.let { texts.getOrNull(it + 1) }?.let { num(it) }
+        val q = num(o.qty)
+        val p = num(o.price)
+        val ok = shown?.first == o.symbol && num(qtyShown) == q && num(priceShown) == p &&
+            value != null && q != null && p != null && kotlin.math.abs(value - q * p) < 0.5
+        val side = if (o.side.equals("sell", true)) " Switch ATrad to SELL before confirming." else " Make sure Buy is selected."
+        if (ok) {
+            finishOrder("Filled ✓ ${o.side.uppercase()} ${o.symbol} ${o.qty} @ ${o.price} (order value ${"%,.2f".format(value)}).$side Then confirm in ATrad.", texts)
+        } else {
+            finishOrder("⚠ ATrad did not take the order correctly (stock ${shown?.first}, quantity ${qtyShown}, price ${priceShown}, order value ${value}). Check every field before confirming.", texts)
+        }
+    }
+
+    private fun num(s: String?): Double? = s?.replace(",", "")?.trim()?.toDoubleOrNull()
+
+    private fun firstEditable(root: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+        fun walk(n: AccessibilityNodeInfo?): AccessibilityNodeInfo? {
+            n ?: return null
+            if (n.isEditable) return n
+            for (i in 0 until n.childCount) walk(n.getChild(i))?.let { return it }
+            return null
+        }
+        return walk(root)
     }
 
     /** The text box for one of `labels`: by its hint, or just after a label text. */
@@ -313,11 +379,27 @@ class AtradReader : AccessibilityService() {
         Toast.makeText(this, message, Toast.LENGTH_LONG).show()
     }
 
+    /** Opens the next portfolio tab still to read, or finishes. */
+    private fun nextTabOrFinish(now: Long) {
+        val root = rootInActiveWindow
+        while (tabsToRead.isNotEmpty() && root != null) {
+            val tab = tabsToRead.removeAt(0)
+            val node = find(root) { isWord(it, tab) } ?: continue
+            if (tap(node)) {
+                visitingTab = true
+                lastTap = now
+                return
+            }
+        }
+        finish(true, "")
+    }
+
     /** Column or field names of a holdings list. */
     private fun isHoldingsLabel(t: String): Boolean {
         val l = t.lowercase().trim()
         return (l.contains("holding") && (l.contains("qty") || l.contains("quantity"))) ||
-            l.startsWith("avg. cost") || l.startsWith("avg cost") || l == "quantity"
+            l.startsWith("avg. cost") || l.startsWith("avg cost") || l == "quantity" ||
+            l == "market value"
     }
 
     private fun isWord(t: String, vararg words: String) =

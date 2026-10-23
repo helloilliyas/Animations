@@ -1527,7 +1527,9 @@ async function reviewAtradCapture(cap) {
     <div class="list">${r.rows.map((x, i) => `
       <div class="row" style="cursor:default"><div><b>${esc(ticker(x.symbol))}</b> <span class="small ${x.change === "same" ? "muted" : "mk-ready"}">${label[x.change]}</span>
         <div class="sub">ATrad ${fmtInt(x.qty)}${x.avg_cost != null ? " @ " + fmt(x.avg_cost) : ""} · yours ${fmtInt(x.ours_qty)}${x.ours_avg != null ? " @ " + fmt(x.ours_avg) : ""}${x.confident ? "" : " · <span class=\"down\">check: read from position</span>"}</div>
-        ${x.avg_cost == null ? `<input class="avg-in" data-avg="${i}" type="number" inputmode="decimal" step="0.01" placeholder="Avg cost (not on this ATrad screen)${x.ours_avg != null ? " — blank keeps " + fmt(x.ours_avg) : " — blank uses last price"}">` : ""}</div><div></div>
+        ${x.avg_cost == null ? `${x.needs_cost ? `<div class="small down">Cost needed — ATrad's cost was not found</div>` : ""}
+          <input class="avg-in" data-avg="${i}" type="number" inputmode="decimal" step="0.01" placeholder="Avg cost${x.ours_avg != null ? " — blank keeps " + fmt(x.ours_avg) : ""}">
+          ${x.last != null && x.needs_cost ? `<label class="small"><input type="checkbox" data-uselast="${i}"> use ATrad's last price ${fmt(x.last)}</label>` : ""}` : ""}</div><div></div>
         <input type="checkbox" data-row="${i}" ${x.change !== "same" ? "checked" : ""}></div>`).join("") || `<div class="empty small">No holdings recognised.</div>`}
       ${r.missing.map((m) => `
       <label class="row" style="cursor:pointer"><div><b>${esc(ticker(m.symbol))}</b> <span class="small down">Not in ATrad</span>
@@ -1537,12 +1539,17 @@ async function reviewAtradCapture(cap) {
     <p class="small muted">Changes are added as adjustment trades dated today (no fees), so your history stays.</p>
     ${rawTexts(cap.texts)}`, (sh) => {
     $("#rv-apply", sh).onclick = async () => {
+      const missing = [];
       const rows = $$("[data-row]", sh).filter((c) => c.checked).map((c) => {
         const i = Number(c.dataset.row), x = r.rows[i];
         const typed = $(`[data-avg="${i}"]`, sh);
-        const avg = x.avg_cost ?? (typed && typed.value ? String(typed.value) : null);
+        const useLast = $(`[data-uselast="${i}"]`, sh);
+        const avg = x.avg_cost ?? (typed && typed.value ? String(typed.value)
+          : useLast && useLast.checked ? String(x.last) : null);
+        if (avg == null && x.needs_cost) missing.push(ticker(x.symbol));
         return { symbol: x.symbol, qty: x.qty, avg_cost: avg };
       });
+      if (missing.length) return toast(`Enter a cost (or tick "use ATrad's last price") for ${missing.join(", ")}`, true);
       const remove = $$("[data-remove]", sh).filter((c) => c.checked).map((c) => c.dataset.remove);
       const res = await attempt(() => call("atrad_apply", { rows, remove }));
       toast(`Real portfolio updated (${res.changed} adjustment${res.changed === 1 ? "" : "s"})`);
