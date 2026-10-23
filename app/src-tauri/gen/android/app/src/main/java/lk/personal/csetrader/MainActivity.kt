@@ -80,6 +80,21 @@ class MainActivity : TauriActivity() {
           Notifier.alert(this, 10_000 + m.optInt("nid"), m.optString("title"), m.optString("body"))
           true
         }
+        // ATrad: status, accessibility settings, portfolio sync, orders.
+        "atradStatus" -> JSONObject()
+          .put("installed", AtradReader.installed(this))
+          .put("enabled", AtradReader.enabled(this))
+        "atradSettings" -> {
+          startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+          true
+        }
+        "atradSync" -> AtradReader.startSync(this)
+        // Last reading (and clears it, so it is handled once).
+        "atradCapture" -> {
+          val f = AtradReader.captureFile(this)
+          if (f.exists()) f.readText().also { f.delete() } else ""
+        }
+        "atradOrder" -> AtradReader.openWithOrder(this, m.optString("text"))
         // Shows (and clears) the crash saved by CrashCatcher.
         "lastCrash" -> {
           val f = java.io.File(filesDir, "last-crash.txt")

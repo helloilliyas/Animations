@@ -1118,3 +1118,63 @@ async fn us_check_frequency_setting_shows_costs() {
         .await
         .is_err());
 }
+
+#[tokio::test]
+async fn atrad_capture_updates_the_real_portfolio() {
+    let h = Harness::new("Market Closed", lk_on(23, 20, 0)).await;
+    h.call("refresh", Value::Null).await;
+    h.call(
+        "add_transaction",
+        json!({"tx": {"date": "2026-10-01", "symbol": "JKH.N0000", "side": "Buy",
+                      "qty": 1000, "price": "18.00", "fees": null}}),
+    )
+    .await;
+    h.call(
+        "add_transaction",
+        json!({"tx": {"date": "2026-10-02", "symbol": "SAMP.N0000", "side": "Buy",
+                      "qty": 100, "price": "80.00", "fees": null}}),
+    )
+    .await;
+    let texts = json!([
+        "Portfolio",
+        "Detailed",
+        "JKH.N0000",
+        "Holding Quantity",
+        "2,000",
+        "Avg. Cost",
+        "18.4600",
+        "COMB",
+        "Holding Quantity",
+        "300",
+        "Avg. Cost",
+        "98.25"
+    ]);
+    let r = h.call("atrad_parse", json!({ "texts": texts })).await;
+    let rows = r["rows"].as_array().unwrap();
+    assert_eq!(rows.len(), 2, "{r}");
+    assert_eq!(rows[0]["change"], "more");
+    assert_eq!(rows[0]["ours_qty"], 1000);
+    assert_eq!(rows[1]["symbol"], "COMB.N0000");
+    assert_eq!(rows[1]["change"], "new");
+    assert_eq!(r["missing"][0]["symbol"], "SAMP.N0000");
+
+    let applied = h
+        .call(
+            "atrad_apply",
+            json!({"rows": [
+                {"symbol": "JKH.N0000", "qty": 2000, "avg_cost": "18.46"},
+                {"symbol": "COMB.N0000", "qty": 300, "avg_cost": "98.25"}],
+                "remove": ["SAMP.N0000"]}),
+        )
+        .await;
+    assert!(applied["changed"].as_u64().unwrap() >= 3);
+    // Reading the same screen again finds nothing to change.
+    let again = h.call("atrad_parse", json!({ "texts": texts })).await;
+    for row in again["rows"].as_array().unwrap() {
+        assert_eq!(row["change"], "same", "{again}");
+    }
+    assert!(again["missing"].as_array().unwrap().is_empty());
+    let jkh = &again["rows"][0];
+    assert_eq!(jkh["ours_qty"], 2000);
+    assert_eq!(jkh["ours_avg"], "18.46");
+}

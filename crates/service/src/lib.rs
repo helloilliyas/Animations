@@ -6,6 +6,7 @@
 //! and price snapshots in SQLite.
 
 mod alerts;
+mod atrad;
 mod chart;
 mod history;
 mod import_list;
@@ -367,6 +368,9 @@ impl AppService {
         }
         if cmd == "us_search" {
             return self.us_search(args).await;
+        }
+        if let Some(r) = self.atrad_command(cmd, args.clone()) {
+            return r;
         }
         if let Some(r) = self.us_command(cmd, args.clone()) {
             return r;

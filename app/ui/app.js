@@ -587,8 +587,8 @@ async function openQuote(symbol) {
     const hist = $("#q-history", root);
     if (hist) hist.ontoggle = () => { if (hist.open && !hist.dataset.loaded) { hist.dataset.loaded = "1"; loadHistory(hist, symbol); } };
     if (!us) {
-      $("#q-buy", root).onclick = () => { closeSheet(); goTicket(symbol, "Buy", q.last); };
-      $("#q-sell", root).onclick = () => { closeSheet(); goTicket(symbol, "Sell", q.last); };
+      $("#q-buy", root).onclick = () => openAtradTicket(symbol, "Buy", q, fav);
+      $("#q-sell", root).onclick = () => openAtradTicket(symbol, "Sell", q, fav);
     }
     $("#q-tv", root).onclick = () => { closeSheet(); openTradingView(symbol, data.us && data.us.exchange); };
     $("#q-fav", root).onclick = () => pickWatchList(symbol);
@@ -863,13 +863,13 @@ function valuationHtml(v, title) {
 async function renderPortfolio() {
   const seg = `<div class="seg" id="pf-tabs">
     <button data-k="paper" class="${state.portfolioTab === "paper" ? "active" : ""}">Paper</button>
-    <button data-k="real" class="${state.portfolioTab === "real" ? "active" : ""}">Real (manual)</button></div>`;
+    <button data-k="real" class="${state.portfolioTab === "real" ? "active" : ""}">Real (ATrad)</button></div>`;
   if (state.portfolioTab === "paper") {
     const a = await call("account");
     return seg + valuationHtml(a.portfolio, "Paper portfolio value");
   }
   const r = await call("real_portfolio");
-  return seg + valuationHtml(r.valuation, "Real portfolio value") + `
+  return seg + `<div class="btn-row" style="margin:10px 0 0"><button class="btn primary" id="rp-sync">⟳ Sync from ATrad</button></div>` + valuationHtml(r.valuation, "Real portfolio value") + `
     <h2>Transactions</h2>
     <div class="btn-row wrap" style="margin-top:0">
       <button class="btn ghost small" id="rp-add">+ Add trade</button>
@@ -885,6 +885,8 @@ async function renderPortfolio() {
       </div>`).join("") : `<div class="empty">Add your ATrad holdings by hand or import a CSV<br><span class="small">date,symbol,side,qty,price,fees</span></div>`}</div>`;
 }
 function mountPortfolio(root) {
+  const sync = $("#rp-sync", root);
+  if (sync) sync.onclick = () => attempt(syncFromAtrad);
   $$("#pf-tabs button", root).forEach((b) => (b.onclick = () => {
     state.portfolioTab = b.dataset.k; prefSet("portfolioTab", state.portfolioTab); render();
   }));
@@ -970,6 +972,11 @@ const bgBridge = (() => {
       wanted: () => send("wanted"),
       notify: (id, title, body) => send("notify", { nid: Number(id), title, body }),
       lastCrash: () => send("lastCrash"),
+      atradStatus: () => send("atradStatus"),
+      atradSettings: () => send("atradSettings"),
+      atradSync: () => send("atradSync"),
+      atradCapture: () => send("atradCapture"),
+      atradOrder: (text) => send("atradOrder", { text }),
       schedule: async (minutes) => send("schedule", { minutes, path: await outboxPath() }),
       scheduleUs: async (minutes) => send("scheduleUs", { minutes, path: await outboxPath() }),
       drain: async () => send("drain", { path: await outboxPath() }),
@@ -1362,6 +1369,180 @@ async function showLastCrash() {
     <p class="muted small">Copy this and send it to get it fixed.</p><textarea readonly>${esc(text)}</textarea>`);
 }
 
+// ---------- ATrad: order ticket and portfolio sync ----------
+// Orders are placed by the user in ATrad: the ticket copies the order and
+// opens ATrad; on return the app asks whether it was placed. Holdings are
+// read from ATrad's Portfolio → Detailed screen by the accessibility
+// service (Android only).
+const ATRAD_PENDING = "atradPendingOrder";
+const ticker = (sym) => sym.replace(/\.N0000$/, "");
+async function openAtradTicket(symbol, side, q, fav) {
+  const [real, est] = await Promise.all([
+    call("real_portfolio").catch(() => null),
+    call("estimate", { symbol, side: "Buy", qty: 1 }).catch(() => null),
+  ]);
+  const held = (real && real.valuation.holdings.find((h) => h.symbol === symbol)) || null;
+  const setup = fav && fav.structure_view && fav.structure_view.setups.find((x) => x.plan.passes);
+  const plan = setup && setup.plan;
+  const last = num(q.last);
+  const picks = side === "Buy"
+    ? [["Last", last], ...(plan ? [["Entry", plan.entry]] : [])]
+    : [["Last", last], ...(plan ? [["Target", plan.target], ["Stop", plan.stop]] : []), ...(held ? [["Break-even", num(held.break_even)]] : [])];
+  const startPrice = side === "Buy" && plan && !setup.triggered ? plan.entry : last;
+  openSheet(`<div class="sheet-head"><h3>${side} ${esc(ticker(symbol))} in ATrad</h3><button class="icon-btn" data-close>✕</button></div>
+    <div class="side-toggle"><button class="buy ${side === "Buy" ? "active" : ""}" data-side="Buy">Buy</button><button class="sell ${side === "Sell" ? "active" : ""}" data-side="Sell">Sell</button></div>
+    <label>Limit price (Rs.)</label><input id="at-price" type="number" inputmode="decimal" step="0.05" value="${esc(String(roundTick(startPrice)))}">
+    <div class="chips" style="margin-top:6px">${picks.map(([k, v]) => `<button class="chip" data-pick="${v}">${k} ${fmt(v)}</button>`).join("")}</div>
+    <label>Quantity</label><input id="at-qty" type="number" inputmode="numeric" step="1" placeholder="Enter shares">
+    ${held ? `<p class="small muted">You hold ${fmtInt(held.qty)} at avg ${fmt(held.avg_cost)} (Real portfolio).</p>` : side === "Sell" ? `<p class="small down">Not in your Real portfolio — sync from ATrad first if you hold it.</p>` : ""}
+    ${plan ? `<p class="small muted">Plan: entry ${fmt(plan.entry)} · stop ${fmt(plan.stop)} · target ${fmt(plan.target)} (${fmt(plan.reward_risk, 1)}×)</p>` : ""}
+    <div class="card" id="at-sum"><div class="small muted">Enter a quantity to see the cost.</div></div>
+    <div class="btn-row"><button class="btn ${side === "Buy" ? "buy" : "sell"}" id="at-place">Place in ATrad</button></div>
+    <p class="small muted">Copies the order and opens ATrad; you confirm it there with your PIN. <a href="#" id="at-paper">Practise on paper instead</a></p>`, (sh) => {
+    let curSide = side;
+    const price = $("#at-price", sh), qty = $("#at-qty", sh), sum = $("#at-sum", sh), place = $("#at-place", sh);
+    const update = async () => {
+      const p = num(price.value), n = Math.floor(num(qty.value));
+      if (!(p > 0) || !(n > 0)) { sum.innerHTML = `<div class="small muted">Enter a quantity to see the ${curSide === "Buy" ? "cost" : "proceeds"}.</div>`; return; }
+      const e = await call("estimate", { symbol, side: curSide, qty: n, price: String(p) }).catch(() => null);
+      if (!e) return;
+      const over = curSide === "Sell" && held && n > held.qty;
+      const pl = curSide === "Sell" && held ? num(e.net) - n * num(held.avg_cost) : null;
+      sum.innerHTML = `<div class="kv">
+        <div class="k">Order value</div><div class="v">${fmt(e.order_value)}</div>
+        <div class="k">Fees (~${fmt(e.fee_pct)}%)</div><div class="v">${fmt(e.fees)}</div>
+        <div class="k total">${curSide === "Buy" ? "Total cost" : "You receive"}</div><div class="v total">Rs. ${fmt(e.net)}</div>
+        ${pl !== null ? `<div class="k">Profit vs your cost</div><div class="v ${dir(pl)}">${signed(pl)}</div>` : ""}</div>
+        ${e.price_valid ? "" : `<div class="small down">Price must be in steps of ${fmt(e.tick)}.</div>`}
+        ${over ? `<div class="small down">More than the ${fmtInt(held.qty)} you hold.</div>` : ""}`;
+    };
+    price.oninput = qty.oninput = update;
+    $$("[data-pick]", sh).forEach((b) => (b.onclick = () => { price.value = String(roundTick(num(b.dataset.pick))); update(); }));
+    $$("[data-side]", sh).forEach((b) => (b.onclick = () => {
+      curSide = b.dataset.side;
+      $$("[data-side]", sh).forEach((x) => x.classList.toggle("active", x === b));
+      place.className = "btn " + (curSide === "Buy" ? "buy" : "sell");
+      $("h3", sh).textContent = `${curSide} ${ticker(symbol)} in ATrad`;
+      update();
+    }));
+    $("#at-paper", sh).onclick = (e) => { e.preventDefault(); closeSheet(); goTicket(symbol, curSide, price.value); };
+    place.onclick = async () => {
+      const p = num(price.value), n = Math.floor(num(qty.value));
+      if (!(p > 0) || !(n > 0)) return toast("Enter the price and quantity", true);
+      const text = `${curSide.toUpperCase()} ${ticker(symbol)} ${fmtInt(n)} @ ${fmt(p)}`;
+      const order = { symbol, side: curSide, qty: n, price: p, text, plan: plan || null, at: Date.now() };
+      prefSet(ATRAD_PENDING, order);
+      closeSheet();
+      const br = bgBridge();
+      if (br && (await br.atradOrder(text))) return;
+      try { await navigator.clipboard.writeText(text); } catch { /* ignore */ }
+      toast(`Copied: ${text}. Open ATrad to place it.`);
+      setTimeout(askOrderPlaced, 400);
+    };
+    qty.focus();
+  });
+}
+// Price rounded to the CSE tick (0.10 below Rs. 100, 0.25 from 100).
+function roundTick(p) {
+  const tick = p >= 100 ? 0.25 : 0.1;
+  return (Math.round(p / tick) * tick).toFixed(2);
+}
+// After returning from ATrad: was the order placed? Records it in the Real
+// portfolio, optionally with alerts at the plan's stop and target.
+function askOrderPlaced() {
+  const o = prefGet(ATRAD_PENDING, null);
+  if (!o || Date.now() - o.at > 6 * 3600e3) return prefSet(ATRAD_PENDING, null);
+  const today = new Date(Date.now() + LK_MS).toISOString().slice(0, 10);
+  openSheet(`<div class="sheet-head"><h3>Did you place it?</h3><button class="icon-btn" data-close>✕</button></div>
+    <p><b>${esc(o.text)}</b></p>
+    <div class="grid2"><div><label>Filled quantity</label><input id="op-qty" type="number" value="${o.qty}"></div>
+      <div><label>Fill price</label><input id="op-price" type="number" step="0.05" value="${o.price}"></div></div>
+    <label>Date</label><input id="op-date" type="date" value="${today}">
+    ${o.side === "Buy" && o.plan ? `<label class="switch-row"><span>Alerts at stop ${fmt(o.plan.stop)} and target ${fmt(o.plan.target)}</span><input type="checkbox" id="op-alerts" checked></label>` : ""}
+    <div class="btn-row"><button class="btn primary" id="op-yes">Yes, record it</button><button class="btn ghost" id="op-no">Not placed</button></div>
+    <p class="small muted">Only filled orders belong in the Real portfolio. If it is still open in ATrad, record it once it fills.</p>`, (sh) => {
+    $("#op-no", sh).onclick = () => { prefSet(ATRAD_PENDING, null); closeSheet(); };
+    $("#op-yes", sh).onclick = async () => {
+      const tx = { date: $("#op-date", sh).value, symbol: o.symbol, side: o.side, qty: Math.floor(num($("#op-qty", sh).value)),
+        price: String($("#op-price", sh).value), fees: null };
+      await attempt(() => call("add_transaction", { tx }), "Recorded in your Real portfolio");
+      const al = $("#op-alerts", sh);
+      if (al && al.checked) {
+        await call("add_custom_alert", { symbol: o.symbol, above: true, price: String(o.plan.target) }).catch(() => {});
+        await call("add_custom_alert", { symbol: o.symbol, above: false, price: String(o.plan.stop) }).catch(() => {});
+      }
+      prefSet(ATRAD_PENDING, null);
+      closeSheet(); render();
+    };
+  });
+}
+// Sync: open ATrad, let the reader fetch Portfolio → Detailed, review.
+async function syncFromAtrad() {
+  const br = bgBridge();
+  if (!br) return toast("Sync from ATrad works in the Android app", true);
+  const st = await br.atradStatus();
+  if (!st.installed) return toast("ATrad is not installed on this phone", true);
+  if (!st.enabled) return openAtradSetup();
+  toast("Opening ATrad… it signs in, opens Portfolio → Detailed and comes back.");
+  await br.atradSync();
+}
+function openAtradSetup() {
+  openSheet(`<div class="sheet-head"><h3>Allow reading ATrad</h3><button class="icon-btn" data-close>✕</button></div>
+    <p class="small">CSE Trader reads your holdings from ATrad with an Android accessibility service that <b>only works inside ATrad</b>. It taps Sign in when your login is already filled in, opens Portfolio → Detailed and reads the holdings. It never types in ATrad and never places or changes orders.</p>
+    <ol class="small">
+      <li>Tap <b>Open settings</b>, then <b>Installed apps</b> (or Downloaded apps).</li>
+      <li>Choose <b>CSE Trader – read ATrad portfolio</b> and turn it on.</li>
+      <li>If Android says the setting is <b>restricted</b>: open Settings → Apps → CSE Trader → ⋮ (top right) → <b>Allow restricted settings</b>, then try step 2 again.</li>
+    </ol>
+    <div class="btn-row"><button class="btn primary" id="as-open">Open settings</button></div>`, (sh) => {
+    $("#as-open", sh).onclick = async () => { closeSheet(); await bgBridge().atradSettings(); };
+  });
+}
+// Shows what was read from ATrad and what would change.
+async function reviewAtradCapture(cap) {
+  if (!cap.ok) return openSheet(`<div class="sheet-head"><h3>Sync from ATrad</h3><button class="icon-btn" data-close>✕</button></div>
+    <p class="down">${esc(cap.message || "Nothing was read")}</p>${rawTexts(cap.texts)}`);
+  const r = await call("atrad_parse", { texts: cap.texts });
+  const label = { new: "New", more: "More shares", less: "Fewer shares", cost: "Avg cost differs", same: "Same" };
+  const changes = r.rows.filter((x) => x.change !== "same");
+  openSheet(`<div class="sheet-head"><h3>Holdings in ATrad</h3><button class="icon-btn" data-close>✕</button></div>
+    <p class="small muted">Read ${r.rows.length} holding${r.rows.length === 1 ? "" : "s"} from ${cap.pages} screen${cap.pages === 1 ? "" : "s"}. Tick what to bring into your Real portfolio.</p>
+    <div class="list">${r.rows.map((x, i) => `
+      <label class="row" style="cursor:pointer"><div><b>${esc(ticker(x.symbol))}</b> <span class="small ${x.change === "same" ? "muted" : "mk-ready"}">${label[x.change]}</span>
+        <div class="sub">ATrad ${fmtInt(x.qty)} @ ${x.avg_cost != null ? fmt(x.avg_cost) : "?"} · yours ${fmtInt(x.ours_qty)}${x.ours_avg != null ? " @ " + fmt(x.ours_avg) : ""}${x.confident ? "" : " · <span class=\"down\">check: read from position</span>"}</div></div><div></div>
+        <input type="checkbox" data-row="${i}" ${x.change !== "same" ? "checked" : ""}></label>`).join("") || `<div class="empty small">No holdings recognised.</div>`}
+      ${r.missing.map((m) => `
+      <label class="row" style="cursor:pointer"><div><b>${esc(ticker(m.symbol))}</b> <span class="small down">Not in ATrad</span>
+        <div class="sub">yours ${fmtInt(m.qty)} · close it in your Real portfolio?</div></div><div></div>
+        <input type="checkbox" data-remove="${esc(m.symbol)}"></label>`).join("")}</div>
+    <div class="btn-row"><button class="btn primary" id="rv-apply" ${changes.length || r.missing.length ? "" : "disabled"}>Update Real portfolio</button></div>
+    <p class="small muted">Changes are added as adjustment trades dated today (no fees), so your history stays.</p>
+    ${rawTexts(cap.texts)}`, (sh) => {
+    $("#rv-apply", sh).onclick = async () => {
+      const rows = $$("[data-row]", sh).filter((c) => c.checked).map((c) => r.rows[Number(c.dataset.row)])
+        .map((x) => ({ symbol: x.symbol, qty: x.qty, avg_cost: x.avg_cost }));
+      const remove = $$("[data-remove]", sh).filter((c) => c.checked).map((c) => c.dataset.remove);
+      const res = await attempt(() => call("atrad_apply", { rows, remove }));
+      toast(`Real portfolio updated (${res.changed} adjustment${res.changed === 1 ? "" : "s"})`);
+      closeSheet(); state.portfolioTab = "real"; prefSet("portfolioTab", "real"); switchTab("portfolio");
+    };
+  });
+}
+function rawTexts(texts) {
+  return `<details class="small"><summary class="muted">What was read (${(texts || []).length} items) — send this if something is missing</summary>
+    <textarea readonly>${esc((texts || []).join("\n"))}</textarea></details>`;
+}
+// Coming back to the app: finish an ATrad order or show a sync result.
+document.addEventListener("visibilitychange", async () => {
+  if (document.visibilityState !== "visible") return;
+  const br = bgBridge();
+  if (br) {
+    const raw = await br.atradCapture();
+    if (raw) { try { return await reviewAtradCapture(JSON.parse(raw)); } catch { /* ignore */ } }
+  }
+  if (prefGet(ATRAD_PENDING, null)) askOrderPlaced();
+});
+
 // ---------- US stocks ----------
 async function openUsSearch() {
   const us = await call("us_settings");
@@ -1524,4 +1705,6 @@ async function poll() {
   call("refresh").then(poll).catch(() => {});
   restoreBackground().catch(() => {});
   showLastCrash().catch(() => {});
+  // An ATrad order or sync left from before the app was closed.
+  setTimeout(() => document.dispatchEvent(new Event("visibilitychange")), 1500);
 })();
