@@ -61,6 +61,18 @@ object Notifier {
         }
     }
 
+    /** Shown while US stocks are checked every 10 or 5 minutes. */
+    fun usWatching(ctx: Context, minutes: Int): Notification {
+        ensureChannels(ctx)
+        return NotificationCompat.Builder(ctx, CHANNEL_WATCH)
+            .setSmallIcon(R.drawable.ic_stat_alert)
+            .setContentTitle("Watching US stocks")
+            .setContentText("Every $minutes minutes until the US close. Change it under 🔔 → US checks.")
+            .setOngoing(true)
+            .setContentIntent(openApp(ctx))
+            .build()
+    }
+
     fun watching(ctx: Context): Notification {
         ensureChannels(ctx)
         val stop = PendingIntent.getService(

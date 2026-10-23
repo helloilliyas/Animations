@@ -39,10 +39,53 @@ const CLOSING_CHECK_HOURS: i64 = 3;
 const FIRST_DAYS: u32 = 400;
 const UPDATE_DAYS: u32 = 10;
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub(crate) struct UsSettings {
     pub api_key: Option<String>,
+    /// Background checks during US hours, in minutes (0 = off). 15 and up
+    /// use Android's job scheduler; 10 and 5 keep a "US watch" service
+    /// running during the session.
+    pub check_minutes: u32,
+}
+
+impl Default for UsSettings {
+    fn default() -> Self {
+        Self {
+            api_key: None,
+            check_minutes: 15,
+        }
+    }
+}
+
+/// US background check choices, in minutes (0 = off).
+pub(crate) const CHECK_CHOICES: [u32; 6] = [0, 60, 30, 15, 10, 5];
+/// Regular session length.
+const SESSION_MINUTES: i64 = 390;
+
+/// What a US check frequency costs for `stocks` stocks: requests per day
+/// (quotes each round, one round after the close, daily history), the
+/// interval the budget actually allows, and whether it is worth offering.
+pub(crate) fn check_cost(minutes: u32, stocks: usize) -> Value {
+    let n = stocks.max(1) as i64;
+    let budget = (PER_DAY - DAY_RESERVE) as i64 - 2 * n;
+    let rounds = if minutes == 0 {
+        0
+    } else {
+        SESSION_MINUTES / minutes as i64
+    };
+    let requests = (rounds + 2) * n;
+    let allowed = quote_interval(SESSION_MINUTES, stocks.max(1), budget.max(0) as u32)
+        .num_minutes()
+        .max(minutes as i64);
+    json!({
+        "minutes": minutes,
+        "requests": requests.min(budget + 2 * n),
+        "every": allowed,
+        // Not offered when the budget would stretch it by over half.
+        "possible": minutes == 0 || allowed * 2 <= minutes as i64 * 3,
+        "service": minutes > 0 && minutes < 15,
+    })
 }
 
 /// Credits used today (UTC day, as the provider counts) and this minute.
@@ -102,6 +145,11 @@ impl UsState {
 #[derive(Deserialize)]
 struct KeyArgs {
     api_key: String,
+}
+
+#[derive(Deserialize)]
+struct ChecksArgs {
+    minutes: u32,
 }
 
 #[derive(Deserialize)]
@@ -382,10 +430,28 @@ impl AppService {
     pub(crate) fn us_command(&self, cmd: &str, args: Value) -> Option<Result<Value>> {
         let r = match cmd {
             "us_settings" => Ok(self.us_settings()),
+            "set_us_checks" => parse::<ChecksArgs>(args).and_then(|a| {
+                if !CHECK_CHOICES.contains(&a.minutes) {
+                    return Err(ServiceError::BadArgs(format!(
+                        "US checks can be every {CHECK_CHOICES:?} minutes"
+                    )));
+                }
+                let settings = UsSettings {
+                    check_minutes: a.minutes,
+                    ..self.state.read().unwrap().us.settings.clone()
+                };
+                self.store
+                    .lock()
+                    .unwrap()
+                    .save_json(SETTINGS_KEY, &settings)?;
+                self.state.write().unwrap().us.settings = settings;
+                Ok(self.us_settings())
+            }),
             "set_us_key" => parse::<KeyArgs>(args).and_then(|a| {
                 let key = a.api_key.trim().to_owned();
                 let settings = UsSettings {
                     api_key: (!key.is_empty()).then_some(key),
+                    ..self.state.read().unwrap().us.settings.clone()
                 };
                 self.store
                     .lock()
@@ -403,6 +469,10 @@ impl AppService {
     }
 
     fn us_settings(&self) -> Value {
+        let stocks = self
+            .favourites()
+            .map(|f| f.iter().filter(|s| is_us(s)).count())
+            .unwrap_or(0);
         let s = self.state.read().unwrap();
         let today = self.now().date_naive();
         let used = if s.us.usage.day == Some(today) {
@@ -418,8 +488,10 @@ impl AppService {
             "day_limit": PER_DAY,
             "per_minute": PER_MINUTE,
             "error": s.us.error,
-            "stocks": s.us.quotes.len(),
+            "stocks": stocks,
             "market_open": us_phase(self.now()) == MarketPhase::Open,
+            "check_minutes": s.us.settings.check_minutes,
+            "options": CHECK_CHOICES.iter().map(|m| check_cost(*m, stocks)).collect::<Vec<_>>(),
         })
     }
 
@@ -523,6 +595,18 @@ mod tests {
         // Budget nearly spent: slow down, never stop the session check.
         assert_eq!(quote_interval(200, 20, 40), Duration::minutes(100));
         assert_eq!(quote_interval(200, 20, 10), Duration::hours(1));
+        // What the settings screen offers for 20 stocks.
+        let c = |m| check_cost(m, 20);
+        assert_eq!(c(15)["requests"], (26 + 2) * 20);
+        assert_eq!(c(15)["possible"], true);
+        assert_eq!(c(15)["service"], false);
+        assert_eq!(c(10)["possible"], true);
+        assert_eq!(c(10)["every"], 11);
+        assert_eq!(c(10)["service"], true);
+        assert_eq!(c(5)["possible"], false);
+        // Few stocks: every 5 minutes fits.
+        assert_eq!(check_cost(5, 8)["possible"], true);
+        assert_eq!(check_cost(5, 8)["every"], 5);
         // Whole-session cost stays within the plan.
         assert!(390 / 11 * 20 <= (PER_DAY - DAY_RESERVE - 20) as i64);
     }

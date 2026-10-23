@@ -126,9 +126,17 @@ and quotes during the US session (09:30–16:00 New York, 7:00 pm–1:30 am Sri
 Lanka time in summer, 8:00 pm–2:30 am in winter) plus one after the close,
 in batches of 8. While the app is open (or in Live mode) the day's remaining
 requests are spread over the rest of the session: about every 11 minutes per
-stock for 20 stocks, never more often than every 5 minutes. About 20 stocks use roughly 300
-requests a day. Timed background checks also run during US hours. Settings
-shows how many requests were used today.
+stock for 20 stocks, never more often than every 5 minutes. Settings shows how many requests were
+used today.
+
+**US checks** (🔔, separate from the CSE checks) set how often US stocks are
+checked when the app is closed: Off, 1 h, 30, 15 (default), 10 or 5 minutes,
+during US hours plus one check after the US close. Each choice shows its
+cost for your number of US stocks (20 stocks: about 300 requests a day at
+30 minutes, 560 at 15); choices the free plan cannot support are greyed
+out. 15 minutes and up use Android's job scheduler; 10 and 5 minutes keep a
+"Watching US stocks" notification and the phone awake during the session
+only. Live mode is for the CSE.
 
 
 

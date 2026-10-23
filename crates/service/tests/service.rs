@@ -1083,3 +1083,38 @@ async fn us_requests_stay_within_eight_a_minute() {
         .count();
     assert_eq!(us, 6);
 }
+
+#[tokio::test]
+async fn us_check_frequency_setting_shows_costs() {
+    let h = Harness::new("Market Closed", lk_on(23, 20, 0)).await;
+    let st = h.call("us_settings", Value::Null).await;
+    assert_eq!(st["check_minutes"], 15);
+    let wl = h.call("create_watch_list", json!({"name": "US"})).await;
+    for i in 0..20 {
+        h.call(
+            "add_to_watch_list",
+            json!({"id": wl["id"], "symbol": format!("T{i}.US")}),
+        )
+        .await;
+    }
+    let st = h.call("set_us_checks", json!({"minutes": 10})).await;
+    assert_eq!(st["check_minutes"], 10);
+    assert_eq!(st["stocks"], 20);
+    let opt = |m: u64| {
+        st["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|o| o["minutes"] == m)
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(opt(30)["requests"], 300);
+    assert_eq!(opt(10)["service"], true);
+    assert_eq!(opt(5)["possible"], false);
+    assert!(h
+        .svc
+        .dispatch("set_us_checks", json!({"minutes": 7}))
+        .await
+        .is_err());
+}

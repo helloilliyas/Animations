@@ -57,6 +57,17 @@ class MainActivity : TauriActivity() {
           CheckJob.schedule(this, minutes)
           true
         }
+        // US checks: 0 off, 60/30/15 minutes as jobs, 10/5 with the US watch service.
+        "scheduleUs" -> {
+          val minutes = m.optInt("minutes")
+          Outbox.setPath(this, m.optString("path"))
+          if (minutes > 0) {
+            requestNotificationPermission()
+            requestBatteryExemption()
+          }
+          CheckJob.scheduleUs(this, minutes)
+          true
+        }
         // Posts notifications for new outbox lines (alerts found while the app is open).
         "drain" -> {
           requestNotificationPermission()

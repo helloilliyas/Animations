@@ -971,6 +971,7 @@ const bgBridge = (() => {
       notify: (id, title, body) => send("notify", { nid: Number(id), title, body }),
       lastCrash: () => send("lastCrash"),
       schedule: async (minutes) => send("schedule", { minutes, path: await outboxPath() }),
+      scheduleUs: async (minutes) => send("scheduleUs", { minutes, path: await outboxPath() }),
       drain: async () => send("drain", { path: await outboxPath() }),
     });
   };
@@ -1142,7 +1143,7 @@ function favouriteCard(f, v) {
 }
 
 async function renderAlerts() {
-  let [v, results] = await Promise.all([call("alerts"), call("alert_results").catch(() => null)]);
+  let [v, results, us] = await Promise.all([call("alerts"), call("alert_results").catch(() => null), call("us_settings").catch(() => null)]);
   const br = bgBridge();
   if (br) {
     const running = await br.isRunning();
@@ -1169,11 +1170,12 @@ async function renderAlerts() {
     <div class="card">
       <label class="switch-row"><span><b>Alerts</b><br><span class="small muted">Signals for stocks in your watch lists</span></span>
         <input type="checkbox" id="al-enabled" ${v.enabled ? "checked" : ""}></label>
-      <div class="switch-row"><span><b>Background checks</b><br><span class="small muted">
-        ${bridge ? "When the app is closed, during trading hours 9:30–2:30 plus one check after the close. Live checks every few seconds and shows a permanent notification."
+      <div class="switch-row"><span><b>CSE checks</b><br><span class="small muted">
+        ${bridge ? "When the app is closed, during CSE hours 9:30–2:30 plus one check after the close. Live checks every few seconds and shows a permanent notification."
                  : "Available in the Android app."}</span></span></div>
       <div class="seg bg-modes">${modes.map(([k, label]) =>
         `<button data-bg="${k}" class="${v.background_mode === k ? "active" : ""}" ${bridge ? "" : "disabled"}>${label}</button>`).join("")}</div>
+      ${us ? usChecksBlock(us, bridge) : ""}
       <label class="switch-row"><span><b>Get ready notifications</b><br><span class="small muted">Also notify when a stock is within ${fmt(P.near_pct, 1)}% of a trigger (always marked in the Watch list)</span></span>
         <input type="checkbox" id="al-ready" ${v.notify_get_ready ? "checked" : ""}></label>
       <label class="switch-row"><span><b>Uptrend broken notifications</b><br><span class="small muted">Notify when a favourite falls below its last higher low (always marked ⚠ in the Watch list)</span></span>
@@ -1227,6 +1229,16 @@ function resultsSection(r) {
 }
 function mountAlerts(root) {
   $("#al-enabled", root).onchange = (e) => attempt(() => call("update_alert_config", { enabled: e.target.checked }));
+  $$("[data-usbg]", root).forEach((b) => (b.onclick = async () => {
+    const minutes = Number(b.dataset.usbg);
+    try {
+      await call("set_us_checks", { minutes });
+      const br = bgBridge();
+      if (br) await br.scheduleUs(minutes);
+      toast(minutes ? `US checks every ${minutes === 60 ? "hour" : minutes + " min"}` : "US checks off");
+    } catch (err) { toast(String(err.message || err), true); }
+    render();
+  }));
   $$("[data-bg]", root).forEach((b) => (b.onclick = async () => {
     const mode = b.dataset.bg;
     try {
@@ -1297,6 +1309,25 @@ $("#open-alerts").onclick = () => switchTab("alerts");
 
 // On launch, restore background mode if it was on and Android stopped it
 // (e.g. after a restart), but not if the user tapped Stop.
+// US checks: own frequency, with what each choice costs on the free plan.
+function usChecksBlock(us, bridge) {
+  const label = (m) => (m === 0 ? "Off" : m === 60 ? "1 h" : m + " min");
+  const sel = us.options.find((o) => o.minutes === us.check_minutes) || us.options[0];
+  const n = us.stocks;
+  const note = !us.has_key ? "Add your Twelve Data key in Settings to use US stocks."
+    : !n ? "No US stocks in your lists yet (Watch → + US)."
+    : sel.minutes === 0 ? "No US checks while the app is closed."
+    : `${n} US stock${n > 1 ? "s" : ""} · about ${sel.requests} of ${us.day_limit} requests a day`
+      + (sel.every > sel.minutes ? ` · about every ${sel.every} min to stay within the limit` : "")
+      + (sel.service ? " · keeps a notification showing and the phone awake during US hours (7 pm–1:30 am, 8 pm–2:30 am in winter)" : "");
+  return `<div class="switch-row"><span><b>US checks</b><br><span class="small muted">
+      ${bridge ? "When the app is closed, during US hours plus one check after the US close." : "Available in the Android app."}</span></span></div>
+    <div class="seg bg-modes">${us.options.map((o) =>
+      `<button data-usbg="${o.minutes}" class="${us.check_minutes === o.minutes ? "active" : ""}" ${bridge && o.possible ? "" : "disabled"}
+        title="${o.possible ? "" : `Needs fewer US stocks or a paid plan (about every ${o.every} min possible)`}">${label(o.minutes)}</button>`).join("")}</div>
+    <p class="small muted" style="margin:-4px 0 8px">${note}${us.options.some((o) => !o.possible) ? ` Greyed out: more requests than the free plan allows for ${n} stocks.` : ""}</p>`;
+}
+
 // Live runs the foreground service; the timed modes schedule periodic
 // checks (Android WorkManager) that run the Rust check without the UI.
 async function applyBackground(mode) {
@@ -1314,6 +1345,8 @@ async function restoreBackground() {
   const br = bgBridge();
   if (!br) return;
   const cfg = await call("alerts");
+  const us = await call("us_settings").catch(() => null);
+  if (us && us.has_key) await br.scheduleUs(us.check_minutes);
   if (cfg.background_mode !== "live") { await br.schedule(cfg.background_mode === "off" ? 0 : Number(cfg.background_mode)); return; }
   if (await br.isRunning()) return;
   if (await br.wanted()) await br.start((await call("outbox_path")) || "");
@@ -1403,7 +1436,9 @@ async function openSettings() {
     $("#us-save", s).onclick = async () => {
       const api_key = $("#us-key", s).value.trim();
       if (!api_key) return toast("Paste the key first", true);
-      await attempt(() => call("set_us_key", { api_key }), "Twelve Data key saved");
+      const saved = await attempt(() => call("set_us_key", { api_key }), "Twelve Data key saved");
+      const br = bgBridge();
+      if (br && saved) await br.scheduleUs(saved.check_minutes);
       closeSheet(); call("refresh").then(poll).catch(() => {});
     };
     const clr = $("#us-clear", s);
