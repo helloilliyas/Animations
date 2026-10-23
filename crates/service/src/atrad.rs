@@ -132,7 +132,11 @@ pub fn parse_capture(texts: &[String], known: &HashSet<String>) -> Vec<Captured>
     let mut out = parse_segments(texts, known);
     for row in texts.iter().filter_map(|t| row_text(t, known)) {
         match out.iter_mut().find(|c| c.symbol == row.symbol) {
-            Some(c) if !c.confident => *c = row,
+            // Quantity from the row, cost (if any) from the details.
+            Some(c) if !c.confident => {
+                c.qty = row.qty;
+                c.confident = true;
+            }
             Some(_) => {}
             None => out.push(row),
         }
@@ -149,9 +153,6 @@ fn parse_segments(texts: &[String], known: &HashSet<String>) -> Vec<Captured> {
         .collect();
     let mut out: Vec<Captured> = Vec::new();
     for (k, (i, sym)) in starts.iter().enumerate() {
-        if out.iter().any(|c| &c.symbol == sym) {
-            continue;
-        }
         let end = starts.get(k + 1).map_or(texts.len(), |(j, _)| *j);
         let seg = &texts[i + 1..end];
         let (mut qty, mut avg, mut last) = (None, None, None);
@@ -175,25 +176,36 @@ fn parse_segments(texts: &[String], known: &HashSet<String>) -> Vec<Captured> {
         }
         let confident = qty.is_some();
         if qty.is_none() {
-            // Table rows: quantity is the first whole number, the average
-            // cost the first price after it.
-            let qi = seg.iter().position(|t| !t.contains('%') && is_whole(t));
-            qty = qi.and_then(|i| number(&seg[i]));
-            avg = qi.and_then(|i| {
-                seg[i + 1..]
-                    .iter()
-                    .find(|t| t.contains('.') && !t.contains('%') && number(t).is_some())
-                    .and_then(|t| number(t))
-            });
+            // Table rows: the quantity is the first whole number. Unlabelled
+            // prices are left alone: in ATrad's list that is the last price,
+            // not the average cost.
+            qty = seg
+                .iter()
+                .find(|t| !t.contains('%') && is_whole(t))
+                .and_then(|t| number(t));
         }
-        if let Some(q) = qty.and_then(|q| u64::try_from(q.trunc()).ok()) {
-            out.push(Captured {
+        let Some(q) = qty.and_then(|q| u64::try_from(q.trunc()).ok()) else {
+            continue;
+        };
+        let avg = avg.filter(|a| *a > Decimal::ZERO);
+        // The same holding again (an opened row, or a scrolled page): fill
+        // in what the earlier reading lacked.
+        match out.iter_mut().find(|c| &c.symbol == sym) {
+            Some(c) => {
+                c.avg_cost = c.avg_cost.or(avg);
+                c.last = c.last.or(last);
+                if confident && !c.confident {
+                    c.qty = q;
+                    c.confident = true;
+                }
+            }
+            None => out.push(Captured {
                 symbol: sym.clone(),
                 qty: q,
-                avg_cost: avg.filter(|a| *a > Decimal::ZERO),
+                avg_cost: avg,
                 last,
                 confident,
-            });
+            }),
         }
     }
     out
@@ -448,6 +460,60 @@ mod tests {
     }
 
     #[test]
+    fn opened_rows_give_the_average_cost() {
+        // ATrad's Detailed list; each row opened in turn shows its details.
+        let texts = t(&[
+            "Symbol",
+            "Quantity",
+            "Last Price",
+            "Holdings %",
+            "Change",
+            "CLND.N0000, 18,085, 5.86%, 44.10, -",
+            "CLND.N0000",
+            "18,085",
+            "5.86%",
+            "44.10",
+            "-",
+            "Avg. Cost",
+            "42.3512",
+            "B.E.S Price",
+            "42.85",
+            "Total Cost",
+            "765,925.48",
+            "RHL.N0000, 122,206, 39.57%, 34.40, -",
+            "RHL.N0000",
+            "122,206",
+            "39.57%",
+            "34.40",
+            "-",
+            // Next page: CLND closed again, RHL opened.
+            "CLND.N0000, 18,085, 5.86%, 44.10, -",
+            "CLND.N0000",
+            "18,085",
+            "5.86%",
+            "44.10",
+            "-",
+            "RHL.N0000, 122,206, 39.57%, 34.40, -",
+            "RHL.N0000",
+            "122,206",
+            "39.57%",
+            "34.40",
+            "-",
+            "Avg. Cost",
+            "31.2045",
+            "B.E.S Price",
+            "31.55",
+        ]);
+        let c = parse_capture(&texts, &known());
+        assert_eq!(c.len(), 2, "{c:?}");
+        assert_eq!((c[0].symbol.as_str(), c[0].qty), ("CLND.N0000", 18085));
+        assert_eq!(c[0].avg_cost, Some(dec!(42.3512)));
+        assert_eq!((c[1].symbol.as_str(), c[1].qty), ("RHL.N0000", 122206));
+        assert_eq!(c[1].avg_cost, Some(dec!(31.2045)));
+        assert!(c.iter().all(|x| x.confident));
+    }
+
+    #[test]
     fn table_rows_and_repeated_pages() {
         // Column headers once, then symbol, qty, pending buy, pending sell,
         // avg cost, ...; the second page repeats COMB after scrolling.
@@ -480,7 +546,8 @@ mod tests {
         let c = parse_capture(&texts, &known());
         assert_eq!(c.len(), 2);
         assert_eq!((c[0].symbol.as_str(), c[0].qty), ("COMB.N0000", 300));
-        assert_eq!(c[0].avg_cost, Some(dec!(98.25)));
+        // Unlabelled prices are not taken as the average cost.
+        assert_eq!(c[0].avg_cost, None);
         assert!(!c[0].confident);
         // Unknown words are not symbols.
         assert!(parse_capture(&t(&["TOTAL", "5000"]), &known()).is_empty());

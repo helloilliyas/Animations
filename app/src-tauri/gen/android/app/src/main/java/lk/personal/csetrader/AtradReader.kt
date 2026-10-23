@@ -29,13 +29,17 @@ class AtradReader : AccessibilityService() {
     companion object {
         const val PKG = "com.ironone.atrad"
         private const val TIMEOUT_MS = 120_000L
-        private const val MAX_PAGES = 12
+        /** Readings kept: one per opened row plus scrolled pages. */
+        private const val MAX_PAGES = 80
+        private val SYMBOL = Regex("^[A-Z0-9&]{1,8}\\.[A-Z]\\d{4}$")
 
         @Volatile
         private var active = false
         private var startedAt = 0L
         private var signInTapped = false
         private var detailedTapped = false
+        /** Holdings whose row has been opened to show its details. */
+        private val opened = mutableSetOf<String>()
         private var lastTap = 0L
         private val pages = mutableListOf<List<String>>()
 
@@ -59,6 +63,7 @@ class AtradReader : AccessibilityService() {
             startedAt = System.currentTimeMillis()
             signInTapped = false
             detailedTapped = false
+            opened.clear()
             lastTap = 0L
             pages.clear()
             ctx.startActivity(launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
@@ -77,6 +82,7 @@ class AtradReader : AccessibilityService() {
 
     private val handler = Handler(Looper.getMainLooper())
     private var pending = false
+    private var retryScheduled = false
 
     override fun onServiceConnected() {}
 
@@ -106,7 +112,21 @@ class AtradReader : AccessibilityService() {
         if (root.packageName?.toString() != PKG) return
         val texts = collect(root)
         val now = System.currentTimeMillis()
-        if (now - lastTap < 1500) return
+        if (now - lastTap < 1500) {
+            // Look again once the last tap has had time to show.
+            if (!retryScheduled) {
+                retryScheduled = true
+                handler.postDelayed({
+                    retryScheduled = false
+                    try {
+                        step()
+                    } catch (e: Exception) {
+                        finish(false, "Reading ATrad failed: ${e.message}")
+                    }
+                }, 1600 - (now - lastTap))
+            }
+            return
+        }
 
         // 1. Login screen with the details already filled in: tap Sign in once.
         if (!signInTapped && hasFilledField(root)) {
@@ -127,14 +147,42 @@ class AtradReader : AccessibilityService() {
                 }
             }
         }
-        // 3. The holdings: read this page, then scroll for more.
+        // 3. The holdings: keep what is on screen (with any opened row's
+        //    details), open the next row (its ˅ shows the average cost),
+        //    then scroll for more rows.
         if (texts.any { isHoldingsLabel(it) }) {
-            if (pages.lastOrNull() == texts) {
+            if (pages.lastOrNull() != texts) pages.add(texts)
+            if (pages.size >= MAX_PAGES) {
                 finish(true, "")
                 return
             }
-            pages.add(texts)
-            if (pages.size >= MAX_PAGES || !scrollForward(root)) finish(true, "")
+            val next = findSymbol(root) { it !in opened }
+            if (next != null) {
+                opened.add(next.first)
+                if (tap(next.second)) {
+                    lastTap = now
+                    return
+                }
+            }
+            val before = texts
+            if (!scrollForward(root)) {
+                finish(true, "")
+                return
+            }
+            lastTap = now
+            // Nothing new after scrolling: the end of the list.
+            handler.postDelayed({
+                val after = rootInActiveWindow?.let { collect(it) }
+                if (active && after == before && findSymbol(rootInActiveWindow ?: return@postDelayed) { it !in opened } == null) {
+                    finish(true, "")
+                }
+            }, 1500)
+            return
+        }
+        // A row tap opened another screen: go back and keep what was read.
+        if (opened.isNotEmpty()) {
+            performGlobalAction(GLOBAL_ACTION_BACK)
+            finish(true, "")
             return
         }
         // 4. Find the way there: the Portfolio tab.
@@ -165,6 +213,20 @@ class AtradReader : AccessibilityService() {
         }
         walk(root)
         return out
+    }
+
+    /** The first holding row (by its symbol text) that `want` accepts. */
+    private fun findSymbol(
+        root: AccessibilityNodeInfo,
+        want: (String) -> Boolean,
+    ): Pair<String, AccessibilityNodeInfo>? {
+        fun walk(n: AccessibilityNodeInfo?): Pair<String, AccessibilityNodeInfo>? {
+            n ?: return null
+            n.text?.toString()?.trim()?.let { if (SYMBOL.matches(it) && want(it)) return it to n }
+            for (i in 0 until n.childCount) walk(n.getChild(i))?.let { return it }
+            return null
+        }
+        return walk(root)
     }
 
     private fun find(root: AccessibilityNodeInfo, match: (String) -> Boolean): AccessibilityNodeInfo? {
