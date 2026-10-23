@@ -660,6 +660,7 @@ dependencies = [
  "cse-core",
  "reqwest 0.12.28",
  "rust_decimal",
+ "serde",
  "serde_json",
  "thiserror 2.0.21",
  "tokio",
