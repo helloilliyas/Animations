@@ -31,6 +31,7 @@ pub(crate) const PER_MINUTE: u32 = 8;
 pub(crate) const PER_DAY: u32 = 800;
 /// Left unused each day so searches still work.
 const DAY_RESERVE: u32 = 20;
+/// Quotes are never refreshed more often than this.
 const QUOTE_EVERY_MIN: i64 = 5;
 const CLOSING_CHECK_HOURS: i64 = 3;
 /// Daily bars downloaded the first time (about a year and a half), then
@@ -108,6 +109,18 @@ struct SearchArgs {
     text: String,
 }
 
+/// How often each stock's quote can be refreshed so that `credits` last for
+/// the `minutes_left` of the session: never more often than every 5
+/// minutes; hourly once the budget is nearly gone.
+pub(crate) fn quote_interval(minutes_left: i64, stocks: usize, credits: u32) -> Duration {
+    let rounds = credits as i64 / stocks.max(1) as i64;
+    if rounds == 0 {
+        return Duration::hours(1);
+    }
+    // Rounded up, so the rounds never outrun the credits.
+    Duration::minutes(((minutes_left + rounds - 1) / rounds).max(QUOTE_EVERY_MIN))
+}
+
 /// A daily point dated at 00:00 Sri Lanka time of its New York trading date.
 fn day_point(q: &Quote, ny_day: NaiveDate) -> ChartPoint {
     ChartPoint {
@@ -161,6 +174,20 @@ impl AppService {
         } else {
             PER_MINUTE.saturating_sub(u.minute_used)
         }
+    }
+
+    /// Credits still usable today, keeping one round for the check after
+    /// the close.
+    fn credits_left_today(&self) -> u32 {
+        let today = self.now().date_naive();
+        let s = self.state.read().unwrap();
+        let used = if s.us.usage.day == Some(today) {
+            s.us.usage.used
+        } else {
+            0
+        };
+        let after_close = s.us.quotes.len() as u32;
+        (PER_DAY - DAY_RESERVE).saturating_sub(used + after_close)
     }
 
     fn us_key(&self) -> Option<String> {
@@ -241,14 +268,21 @@ impl AppService {
         let close = us_close_on(ny_today);
         let closing = phase == MarketPhase::Closed
             && close.is_some_and(|c| now >= c && now < c + Duration::hours(CLOSING_CHECK_HOURS));
+        // Spread the day's remaining credits over the rest of the session.
+        let every = match close {
+            Some(c) if phase == MarketPhase::Open => quote_interval(
+                (c - now).num_minutes(),
+                favs.len(),
+                self.credits_left_today(),
+            ),
+            _ => Duration::minutes(QUOTE_EVERY_MIN),
+        };
         let stale: Vec<String> = {
             let s = self.state.read().unwrap();
             favs.iter()
                 .filter(|sym| match s.us.quotes.get(*sym) {
                     None => true,
-                    Some(e) if phase == MarketPhase::Open => {
-                        now - e.fetched_at >= Duration::minutes(QUOTE_EVERY_MIN)
-                    }
+                    Some(e) if phase == MarketPhase::Open => now - e.fetched_at >= every,
                     Some(e) => closing && close.is_some_and(|c| e.fetched_at < c),
                 })
                 .cloned()
@@ -471,5 +505,25 @@ impl AppService {
             "history_days": stored.len(),
             "history_since": stored.first().map(|p| lk_day(p.at)),
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quotes_spread_over_the_session() {
+        // Full session, 20 stocks, a fresh day: about every 11 minutes.
+        assert_eq!(quote_interval(390, 20, 760), Duration::minutes(11));
+        // Few stocks: the 5-minute floor.
+        assert_eq!(quote_interval(390, 5, 760), Duration::minutes(5));
+        // Late in the session with credits left: faster again.
+        assert_eq!(quote_interval(60, 20, 400), Duration::minutes(5));
+        // Budget nearly spent: slow down, never stop the session check.
+        assert_eq!(quote_interval(200, 20, 40), Duration::minutes(100));
+        assert_eq!(quote_interval(200, 20, 10), Duration::hours(1));
+        // Whole-session cost stays within the plan.
+        assert!(390 / 11 * 20 <= (PER_DAY - DAY_RESERVE - 20) as i64);
     }
 }
