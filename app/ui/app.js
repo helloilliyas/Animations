@@ -976,7 +976,8 @@ const bgBridge = (() => {
       atradSettings: () => send("atradSettings"),
       atradSync: () => send("atradSync"),
       atradCapture: () => send("atradCapture"),
-      atradOrder: (text) => send("atradOrder", { text }),
+      atradOrder: (text, order) => send("atradOrder", { text, order }),
+      atradOrderLog: () => send("atradOrderLog"),
       schedule: async (minutes) => send("schedule", { minutes, path: await outboxPath() }),
       scheduleUs: async (minutes) => send("scheduleUs", { minutes, path: await outboxPath() }),
       drain: async () => send("drain", { path: await outboxPath() }),
@@ -1398,7 +1399,7 @@ async function openAtradTicket(symbol, side, q, fav) {
     ${plan ? `<p class="small muted">Plan: entry ${fmt(plan.entry)} · stop ${fmt(plan.stop)} · target ${fmt(plan.target)} (${fmt(plan.reward_risk, 1)}×)</p>` : ""}
     <div class="card" id="at-sum"><div class="small muted">Enter a quantity to see the cost.</div></div>
     <div class="btn-row"><button class="btn ${side === "Buy" ? "buy" : "sell"}" id="at-place">Place in ATrad</button></div>
-    <p class="small muted">Copies the order and opens ATrad; you confirm it there with your PIN. <a href="#" id="at-paper">Practise on paper instead</a></p>`, (sh) => {
+    <p class="small muted">Opens ATrad's Buy Sell screen with the symbol, quantity and price filled in (when the ATrad reader is on). Check Buy/Sell and confirm it there yourself. <a href="#" id="at-paper">Practise on paper instead</a></p>`, (sh) => {
     let curSide = side;
     const price = $("#at-price", sh), qty = $("#at-qty", sh), sum = $("#at-sum", sh), place = $("#at-place", sh);
     const update = async () => {
@@ -1434,7 +1435,14 @@ async function openAtradTicket(symbol, side, q, fav) {
       prefSet(ATRAD_PENDING, order);
       closeSheet();
       const br = bgBridge();
-      if (br && (await br.atradOrder(text))) return;
+      if (br) {
+        const st = await br.atradStatus();
+        const fill = { ticker: ticker(symbol), symbol, side: curSide, qty: String(n), price: p.toFixed(2) };
+        if (await br.atradOrder(text, fill)) {
+          if (!st.enabled) toast("Copied. Turn on the ATrad reader (Portfolio → Sync from ATrad) to have the order filled in.");
+          return;
+        }
+      }
       try { await navigator.clipboard.writeText(text); } catch { /* ignore */ }
       toast(`Copied: ${text}. Open ATrad to place it.`);
       setTimeout(askOrderPlaced, 400);
@@ -1460,7 +1468,16 @@ function askOrderPlaced() {
     <label>Date</label><input id="op-date" type="date" value="${today}">
     ${o.side === "Buy" && o.plan ? `<label class="switch-row"><span>Alerts at stop ${fmt(o.plan.stop)} and target ${fmt(o.plan.target)}</span><input type="checkbox" id="op-alerts" checked></label>` : ""}
     <div class="btn-row"><button class="btn primary" id="op-yes">Yes, record it</button><button class="btn ghost" id="op-no">Not placed</button></div>
-    <p class="small muted">Only filled orders belong in the Real portfolio. If it is still open in ATrad, record it once it fills.</p>`, (sh) => {
+    <p class="small muted">Only filled orders belong in the Real portfolio. If it is still open in ATrad, record it once it fills.</p>
+    <div id="op-log"></div>`, (sh) => {
+    const br = bgBridge();
+    if (br) br.atradOrderLog().then((raw) => {
+      if (!raw) return;
+      try {
+        const log = JSON.parse(raw);
+        $("#op-log", sh).innerHTML = `<p class="small muted">ATrad: ${esc(log.message)}</p>${log.texts && log.texts.length ? rawTexts(log.texts).replace("send this if something is missing", "send this if the order was not filled in") : ""}`;
+      } catch { /* ignore */ }
+    }).catch(() => {});
     $("#op-no", sh).onclick = () => { prefSet(ATRAD_PENDING, null); closeSheet(); };
     $("#op-yes", sh).onclick = async () => {
       const tx = { date: $("#op-date", sh).value, symbol: o.symbol, side: o.side, qty: Math.floor(num($("#op-qty", sh).value)),
@@ -1488,7 +1505,7 @@ async function syncFromAtrad() {
 }
 function openAtradSetup() {
   openSheet(`<div class="sheet-head"><h3>Allow reading ATrad</h3><button class="icon-btn" data-close>✕</button></div>
-    <p class="small">CSE Trader reads your holdings from ATrad with an Android accessibility service that <b>only works inside ATrad</b>. It taps Sign in when your login is already filled in, opens Portfolio → Detailed and reads the holdings. It never types in ATrad and never places or changes orders.</p>
+    <p class="small">CSE Trader uses an Android accessibility service that <b>only works inside ATrad</b>, and only when you ask. <b>Sync from ATrad</b> taps Sign in when your login is already filled in, opens Portfolio → Detailed and reads your holdings. <b>Place in ATrad</b> opens Buy Sell and fills in the symbol, quantity and price. It never taps Buy, Sell or Submit and never enters your PIN: you confirm every order yourself.</p>
     <ol class="small">
       <li>Tap <b>Open settings</b>, then <b>Installed apps</b> (or Downloaded apps).</li>
       <li>Choose <b>CSE Trader – read ATrad portfolio</b> and turn it on.</li>

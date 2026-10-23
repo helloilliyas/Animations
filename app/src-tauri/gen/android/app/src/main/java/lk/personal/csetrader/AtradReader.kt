@@ -6,24 +6,32 @@ import android.content.ClipboardManager
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.os.Build
+import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import android.widget.Toast
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 
 /**
- * Reads holdings from the ATrad app (Portfolio → Detailed) when the user
- * taps "Sync from ATrad". Android only shows this service ATrad's windows
- * (see res/xml/atrad_accessibility.xml).
+ * Works inside the ATrad app only (Android shows this service no other
+ * app; see res/xml/atrad_accessibility.xml), and only when the user asks:
  *
- * What it does inside ATrad, and nothing more: taps Sign in when the login
- * is already filled in, taps the Portfolio and Detailed tabs, scrolls the
- * holdings list, and reads the text. It never types and never touches
- * order screens. Screens are recognised by their visible words.
+ * - **Sync from ATrad**: taps Sign in when the login is already filled in,
+ *   opens Portfolio → Detailed, opens each holding's row and reads the
+ *   text, then returns to CSE Trader.
+ * - **Place in ATrad**: signs in the same way, opens the Buy Sell tab and
+ *   fills in the symbol, quantity and price. It never taps Buy, Sell,
+ *   Submit or any confirm button and never enters a PIN: the user checks
+ *   and confirms the order in ATrad. If the fields cannot be identified
+ *   with certainty, nothing is typed.
+ *
+ * Screens and fields are recognised by their visible words.
  */
 class AtradReader : AccessibilityService() {
     companion object {
@@ -64,17 +72,39 @@ class AtradReader : AccessibilityService() {
             signInTapped = false
             detailedTapped = false
             opened.clear()
+            order = null
             lastTap = 0L
             pages.clear()
             ctx.startActivity(launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
             return true
         }
 
-        /** Copies an order to the clipboard and opens ATrad (no automation). */
-        fun openWithOrder(ctx: Context, text: String): Boolean {
+        /** An order to fill in on ATrad's Buy Sell screen. */
+        data class Order(val ticker: String, val symbol: String, val side: String, val qty: String, val price: String)
+
+        private var order: Order? = null
+        private var orderStage = 0
+        private var tabTappedAt = 0L
+
+        fun orderLogFile(ctx: Context) = File(ctx.filesDir, "atrad-order.json")
+
+        /**
+         * Copies the order, opens ATrad and (when the reader is on) fills in
+         * the Buy Sell screen for the user to confirm.
+         */
+        fun openWithOrder(ctx: Context, text: String, o: Order?): Boolean {
             val launch = ctx.packageManager.getLaunchIntentForPackage(PKG) ?: return false
             val cm = ctx.getSystemService(ClipboardManager::class.java)
             cm.setPrimaryClip(ClipData.newPlainText("ATrad order", text))
+            if (o != null && enabled(ctx)) {
+                active = true
+                startedAt = System.currentTimeMillis()
+                signInTapped = false
+                lastTap = 0L
+                tabTappedAt = 0L
+                orderStage = 0
+                order = o
+            }
             ctx.startActivity(launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
             return true
         }
@@ -105,7 +135,8 @@ class AtradReader : AccessibilityService() {
     private fun step() {
         if (!active) return
         if (System.currentTimeMillis() - startedAt > TIMEOUT_MS) {
-            finish(false, "Timed out: open Portfolio → Detailed in ATrad and try again")
+            if (order != null) finishOrder("Could not fill the order in time — it is copied; enter it in ATrad.", emptyList())
+            else finish(false, "Timed out: open Portfolio → Detailed in ATrad and try again")
             return
         }
         val root = rootInActiveWindow ?: return
@@ -135,6 +166,11 @@ class AtradReader : AccessibilityService() {
                 lastTap = now
                 return
             }
+        }
+        // Placing an order: fill in the Buy Sell screen, then stop.
+        order?.let {
+            orderStep(root, texts, now, it)
+            return
         }
         // 2. On the portfolio, open the Detailed tab (it has the average
         //    cost) before reading.
@@ -188,6 +224,93 @@ class AtradReader : AccessibilityService() {
         // 4. Find the way there: the Portfolio tab.
         val target = find(root) { isWord(it, "portfolio") }
         if (target != null && tap(target)) lastTap = now
+    }
+
+    /**
+     * Fills the Buy Sell screen: symbol first (picking the matching
+     * suggestion if a list appears), then quantity and price. Never taps a
+     * button on that screen.
+     */
+    private fun orderStep(root: AccessibilityNodeInfo, texts: List<String>, now: Long, o: Order) {
+        val symbolField = fieldFor(root, listOf("symbol", "security", "stock", "search symbol"))
+        val qtyField = fieldFor(root, listOf("quantity", "qty", "order qty", "order quantity"))
+        val priceField = fieldFor(root, listOf("price", "limit price", "order price"))
+        val sure = qtyField != null && priceField != null && qtyField != priceField
+        if (!sure) {
+            if (tabTappedAt == 0L) {
+                find(root) { isWord(it, "buy sell", "buy/sell", "buysell", "buy & sell") }?.let {
+                    if (tap(it)) {
+                        tabTappedAt = now
+                        lastTap = now
+                    }
+                }
+            } else if (now - tabTappedAt > 15_000) {
+                finishOrder("Opened Buy Sell. The order is copied — enter it and confirm in ATrad.", texts)
+            }
+            return
+        }
+        when (orderStage) {
+            0 -> {
+                orderStage = 1
+                if (symbolField != null && symbolField != qtyField && symbolField != priceField) {
+                    setText(symbolField, o.ticker)
+                    lastTap = now
+                    return
+                }
+            }
+            1 -> {
+                orderStage = 2
+                // A suggestion list: pick the exact symbol (not the field itself).
+                find(root) { it.equals(o.symbol, true) || it.equals(o.ticker, true) || it.startsWith(o.symbol + " ", true) }
+                    ?.takeIf { !it.isEditable }
+                    ?.let {
+                        if (tap(it)) {
+                            lastTap = now
+                            return
+                        }
+                    }
+            }
+        }
+        setText(qtyField!!, o.qty)
+        setText(priceField!!, o.price)
+        finishOrder("Filled: ${o.side.uppercase()} ${o.ticker} ${o.qty} @ ${o.price}. Check Buy/Sell and the details, then confirm in ATrad.", collect(root))
+    }
+
+    /** The text box for one of `labels`: by its hint, or just after a label text. */
+    private fun fieldFor(root: AccessibilityNodeInfo, labels: List<String>): AccessibilityNodeInfo? {
+        val nodes = mutableListOf<AccessibilityNodeInfo>()
+        fun walk(n: AccessibilityNodeInfo?) {
+            n ?: return
+            nodes.add(n)
+            for (i in 0 until n.childCount) walk(n.getChild(i))
+        }
+        walk(root)
+        fun norm(s: CharSequence?) = s?.toString()?.trim()?.trimEnd(':', '*', ' ')?.lowercase()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            nodes.firstOrNull { it.isEditable && norm(it.hintText) in labels }?.let { return it }
+        }
+        val i = nodes.indexOfFirst { !it.isEditable && norm(it.text ?: it.contentDescription) in labels }
+        if (i < 0) return null
+        return nodes.drop(i + 1).take(6).firstOrNull { it.isEditable }
+    }
+
+    private fun setText(node: AccessibilityNodeInfo, value: String) {
+        val args = Bundle().apply {
+            putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, value)
+        }
+        node.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+        node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+    }
+
+    /** Ends order filling, leaving the user in ATrad to check and confirm. */
+    private fun finishOrder(message: String, texts: List<String>) {
+        active = false
+        order = null
+        orderLogFile(this).writeText(
+            JSONObject().put("message", message).put("at", System.currentTimeMillis())
+                .put("texts", JSONArray(texts)).toString()
+        )
+        Toast.makeText(this, message, Toast.LENGTH_LONG).show()
     }
 
     /** Column or field names of a holdings list. */

@@ -94,7 +94,18 @@ class MainActivity : TauriActivity() {
           val f = AtradReader.captureFile(this)
           if (f.exists()) f.readText().also { f.delete() } else ""
         }
-        "atradOrder" -> AtradReader.openWithOrder(this, m.optString("text"))
+        "atradOrder" -> AtradReader.openWithOrder(
+          this,
+          m.optString("text"),
+          m.optJSONObject("order")?.let {
+            AtradReader.Companion.Order(
+              it.optString("ticker"), it.optString("symbol"), it.optString("side"),
+              it.optString("qty"), it.optString("price")
+            )
+          }
+        )
+        // What the reader saw on ATrad's Buy Sell screen last time.
+        "atradOrderLog" -> AtradReader.orderLogFile(this).let { if (it.exists()) it.readText() else "" }
         // Shows (and clears) the crash saved by CrashCatcher.
         "lastCrash" -> {
           val f = java.io.File(filesDir, "last-crash.txt")

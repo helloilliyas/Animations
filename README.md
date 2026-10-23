@@ -117,7 +117,10 @@ Signals are prompts to look at a stock, not buy recommendations.
 ATrad: the price is filled in (last price, the plan's entry, or target /
 stop / break-even for sells), you type the quantity, and it shows the cost
 or proceeds after fees. **Place in ATrad** copies the order (e.g. `BUY DIPD
-1,000 @ 56.50`) and opens ATrad, where you place and confirm it yourself.
+1,000 @ 56.50`), opens ATrad and, with the ATrad reader on, goes to Buy Sell
+and fills in the symbol, quantity and price. It never taps Buy, Sell or
+Submit and never enters a PIN: you check the order and confirm it in ATrad.
+If it cannot tell the fields apart with certainty it types nothing.
 Back in CSE Trader it asks whether the order was placed and records the fill
 in the Real portfolio, optionally with alerts at the plan's stop and target.
 "Practise on paper instead" opens the paper ticket.
@@ -126,8 +129,7 @@ in the Real portfolio, optionally with alerts at the plan's stop and target.
 Portfolio → Detailed screen with an Android accessibility service that only
 works inside ATrad (`res/xml/atrad_accessibility.xml`). It taps Sign in when
 your login is already filled in, opens Portfolio → Detailed, scrolls and
-reads the holdings, then returns. It never types in ATrad and never places
-or changes orders. You review what was read (symbol, quantity, average cost)
+reads the holdings (opening each row for its average cost), then returns. You review what was read (symbol, quantity, average cost)
 against the Real portfolio and choose what to update; changes are added as
 adjustment trades dated today with no fees, so history stays. Turn it on
 once in Android Settings → Accessibility → Installed apps; for sideloaded
