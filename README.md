@@ -16,6 +16,7 @@ See [`docs/atrad-spec.md`](docs/atrad-spec.md) for the feature spec.
 | `crates/engine` (`cse-engine`) | Paper trading: limit/market orders, Day or N-day TIF, queuing while closed, amend/cancel, fills, cash and buying power, portfolio with average cost, B.E.S, realised/unrealised P&L |
 | `crates/storage` (`cse-storage`) | SQLite: price and index snapshots for charts, watch lists, saved app state (paper account) |
 | `crates/signals` (`cse-signals`) | Market structure (zigzag swings, trend, higher-low and breakout setups with trade plans) plus indicator signals; filters and one-year track records |
+| `crates/cli` (`cse-cli`) | `cse` command-line interface with JSON output (see `docs/cli.md`) |
 | `crates/service` (`cse-service`) | App backend: market data cache and poller, paper engine, real portfolio, alerts, JSON command API |
 | `crates/dev-server` | Runs the app in a desktop browser at http://127.0.0.1:8787 |
 | `app/ui` | Mobile UI (HTML/CSS/JS): Market, Watch, Quote, Buy/Sell, Orders, Portfolio, Settings |
@@ -28,6 +29,10 @@ cargo run -p cse-dev-server    # then open http://127.0.0.1:8787
 ```
 
 To build the Android APK, follow [`docs/android-build.md`](docs/android-build.md).
+
+**Command line:** `cse` runs the same engine from a terminal with JSON
+output, for scripts and AI agents (`cargo install --path crates/cli`). See
+[`docs/cli.md`](docs/cli.md).
 
 ## Paper-trading rules
 

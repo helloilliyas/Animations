@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
 exclude = ["app/src-tauri"]
-members = ["crates/core", "crates/cse-client", "crates/engine", "crates/service", "crates/signals", "crates/storage", "crates/dev-server"]
+members = ["crates/core", "crates/cse-client", "crates/engine", "crates/service", "crates/signals", "crates/storage", "crates/dev-server", "crates/cli"]
 
 [workspace.package]
 edition = "2021"
