@@ -12,8 +12,10 @@
       {
         "label": "main",
         "title": "CSE Trader",
-        "width": 420,
-        "height": 860
+        "width": 1280,
+        "height": 820,
+        "minWidth": 380,
+        "minHeight": 600
       }
     ],
     "security": {

@@ -94,6 +94,7 @@ function openSheet(html, onMount) {
 }
 function closeSheet() { $("#sheet").classList.add("hidden"); $("#sheet-body").innerHTML = ""; }
 $("#sheet").addEventListener("click", (e) => { if (e.target.id === "sheet") closeSheet(); });
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !$("#sheet").classList.contains("hidden")) closeSheet(); });
 
 // ---------- header status ----------
 function renderStatus() {
@@ -984,6 +985,10 @@ const bgBridge = (() => {
     });
   };
 })();
+// Desktop app: the Rust side keeps checking from the tray and shows system
+// notifications for alerts.
+const DESKTOP = !!window.__TAURI__ && !/Android/i.test(navigator.userAgent);
+const DESKTOP_CHECKS = "On the computer: checks run while CSE Trader is open or in the tray (closing the window keeps it running; Quit from the tray icon stops it).";
 let outboxFile = null;
 async function outboxPath() { return outboxFile ??= (await call("outbox_path")) || ""; }
 let lastAlertId = prefGet("lastAlertId", null);
@@ -997,7 +1002,7 @@ async function checkAlerts() {
   for (const a of r.alerts) {
     const title = `${a.symbol.replace(/\.(N0000|US)$/, "")} · ${a.kind}`;
     toast(`🔔 ${title}: ${a.message}`);
-    if (!bridge && "Notification" in window && Notification.permission === "granted") {
+    if (!bridge && !DESKTOP && "Notification" in window && Notification.permission === "granted") {
       try { new Notification(title, { body: a.message }); } catch { /* ignore */ }
     }
   }
@@ -1180,7 +1185,7 @@ async function renderAlerts() {
         <input type="checkbox" id="al-enabled" ${v.enabled ? "checked" : ""}></label>
       <div class="switch-row"><span><b>CSE checks</b><br><span class="small muted">
         ${bridge ? "When the app is closed, during CSE hours 9:30–2:30 plus one check after the close. Live checks every few seconds and shows a permanent notification."
-                 : "Available in the Android app."}</span></span></div>
+                 : DESKTOP ? DESKTOP_CHECKS : "Available in the Android app."}</span></span></div>
       <div class="seg bg-modes">${modes.map(([k, label]) =>
         `<button data-bg="${k}" class="${v.background_mode === k ? "active" : ""}" ${bridge ? "" : "disabled"}>${label}</button>`).join("")}</div>
       ${us ? usChecksBlock(us, bridge) : ""}
@@ -1329,7 +1334,7 @@ function usChecksBlock(us, bridge) {
       + (sel.every > sel.minutes ? ` · about every ${sel.every} min to stay within the limit` : "")
       + (sel.service ? " · keeps a notification showing and the phone awake during US hours (7 pm–1:30 am, 8 pm–2:30 am in winter)" : "");
   return `<div class="switch-row"><span><b>US checks</b><br><span class="small muted">
-      ${bridge ? "When the app is closed, during US hours plus one check after the US close." : "Available in the Android app."}</span></span></div>
+      ${bridge ? "When the app is closed, during US hours plus one check after the US close." : DESKTOP ? DESKTOP_CHECKS : "Available in the Android app."}</span></span></div>
     <div class="seg bg-modes">${us.options.map((o) =>
       `<button data-usbg="${o.minutes}" class="${us.check_minutes === o.minutes ? "active" : ""}" ${bridge && o.possible ? "" : "disabled"}
         title="${o.possible ? "" : `Needs fewer US stocks or a paid plan (about every ${o.every} min possible)`}">${label(o.minutes)}</button>`).join("")}</div>

@@ -30,6 +30,9 @@ cargo run -p cse-dev-server    # then open http://127.0.0.1:8787
 
 To build the Android APK, follow [`docs/android-build.md`](docs/android-build.md).
 
+**Desktop app:** Windows, macOS and Linux installers with a wide layout,
+tray icon and system notifications. See [`docs/desktop.md`](docs/desktop.md).
+
 **Command line:** `cse` runs the same engine from a terminal with JSON
 output, for scripts and AI agents (`cargo install --path crates/cli`). See
 [`docs/cli.md`](docs/cli.md).
